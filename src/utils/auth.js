@@ -69,18 +69,20 @@ export const ROLES = [
 // menos que conectes persistencia real (ej. Supabase) más adelante.
 //
 // ----------------------------------------------------------------------
-// CREDENCIALES INICIALES EN TEXTO PLANO (solo para que pruebes de una vez;
-// bórralas de aquí o cámbialas apenas hagas login la primera vez):
+// CREDENCIAL INICIAL EN TEXTO PLANO (solo para que puedas entrar la primera
+// vez; cámbiala apenas hagas login, desde "Usuarios y accesos"):
 //
-//   Usuario: admin        / Clave: Admin2026*        (Gestión Estratégica)
-//   Usuario: comercial1   / Clave: Comercial2026*     (Gestión Comercial)
+//   Usuario: admin  / Clave: Admin2026*  (Gestión Estratégica)
 //
-// Sus hashes (ya calculados con la sal de arriba, SHA-256(sal + clave)):
-//   admin      -> 0990b24ea4538900510ee09c04241ab5c6670e63123d09dc68b354796ee644f5
-//   comercial1 -> 2123398c14da27efbf30b3631b56c5089084d13c88de82880042670ecd2fba8
+// Su hash (ya calculado con la sal de arriba, SHA-256(sal + clave)):
+//   admin -> 0990b24ea4538900510ee09c04241ab5c6670e63123d09dc68b354796ee644f5
 //
-// Si cambias la sal (SALT arriba), estos hashes ya NO sirven — tendrías que
-// recalcularlos. Puedes recalcular cualquier hash abriendo la consola del
+// Con esta única cuenta, Gestión Estratégica crea desde la app al resto del
+// equipo (comerciales, seguimiento y evaluación) — no hace falta dejar más
+// usuarios de ejemplo aquí en el código.
+//
+// Si cambias la sal (SALT arriba), este hash ya NO sirve — tendrías que
+// recalcularlo. Puedes recalcular cualquier hash abriendo la consola del
 // navegador (F12) y ejecutando, por ejemplo:
 //   await hashClave("TuClaveNueva*")
 // (con este módulo importado en el contexto, o pegando la función completa).
@@ -92,13 +94,6 @@ export const USUARIOS_SEMILLA = [
     nombreCompleto: "Administrador",
     rolId: "ESTRATEGICA",
     passwordHash: "0990b24ea4538900510ee09c04241ab5c6670e63123d09dc68b354796ee644f5",
-  },
-  {
-    id: "u2",
-    usuario: "comercial1",
-    nombreCompleto: "Vendedor 1",
-    rolId: "COMERCIAL",
-    passwordHash: "2123398c14da27efbf30b3631b56c5089084d13c88de82880042670ecd2fba8",
   },
 ];
 
