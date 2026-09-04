@@ -4117,6 +4117,7 @@ function VistaCotizaciones({ cotizaciones, crearCotizacionEnBD, actualizarCotiza
   const [modoEdicion, setModoEdicion] = useState("NUEVA"); // NUEVA | EDITAR_BORRADOR | NUEVA_VERSION
   const [confirmandoEliminarId, setConfirmandoEliminarId] = useState(null);
   const [confirmandoEliminarGrave, setConfirmandoEliminarGrave] = useState(null); // { id, numeroCompleto } — para Enviada/Reemplazada
+  const [confirmandoEliminarDefinitivo, setConfirmandoEliminarDefinitivo] = useState(null); // { id, numeroCompleto } — borrado real, solo desde Inhabilitada
   const [marcandoPerdidaId, setMarcandoPerdidaId] = useState(null);
   const [motivoPerdidaTexto, setMotivoPerdidaTexto] = useState("");
   const [estadoGuardado, setEstadoGuardado] = useState("inactivo"); // inactivo | guardando | listo | error
@@ -4649,6 +4650,7 @@ function VistaCotizaciones({ cotizaciones, crearCotizacionEnBD, actualizarCotiza
                       <>
                         <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-medium text-slate-600">Inhabilitada</span>
                         <button onClick={() => { const estadoRestaurado = q.estadoAntesDeInhabilitar || "ENVIADA"; actualizarCotizacionEnBD(q.id, { estado: estadoRestaurado }); onEstadoCotizacionActualizado?.(`${q.numero}-${q.revision}`, { estado: estadoRestaurado }); }} disabled={soloLectura} className="rounded bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-500 disabled:opacity-40">¿Fue un error? Habilitar de nuevo</button>
+                        <button onClick={() => setConfirmandoEliminarDefinitivo({ id: q.id, numeroCompleto })} disabled={soloLectura} title="Borra la cotización de verdad — a diferencia de Inhabilitar, esto no se puede deshacer. Pensado para limpiar registros de prueba, no para negocios reales." className="rounded border border-rose-300 px-2 py-1 text-[11px] font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-40">Eliminar definitivamente</button>
                       </>
                     )}
                   </div>
@@ -4701,6 +4703,32 @@ function VistaCotizaciones({ cotizaciones, crearCotizacionEnBD, actualizarCotiza
                 className="flex-1 rounded-lg bg-rose-600 px-4 py-3 text-sm font-semibold text-white hover:bg-rose-700"
               >
                 Sí, inhabilitar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmandoEliminarDefinitivo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-4">
+          <div className="w-full max-w-md rounded-2xl border-4 border-rose-600 bg-white p-6 text-center shadow-2xl">
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-rose-100">
+              <span className="text-3xl">⚠️</span>
+            </div>
+            <p className="mb-1 text-lg font-bold text-rose-700">¿Eliminar DEFINITIVAMENTE la cotización {confirmandoEliminarDefinitivo.numeroCompleto}?</p>
+            <p className="mb-5 text-sm text-slate-600">Esta vez sí se borra de verdad — no queda registro en la app ni forma de deshacerlo. Úsalo solo para limpiar cotizaciones de prueba; para un negocio real, usa "Inhabilitar" en vez de esto.</p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setConfirmandoEliminarDefinitivo(null)}
+                className="flex-1 rounded-lg border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => { eliminarCotizacionEnBD(confirmandoEliminarDefinitivo.id); onEstadoCotizacionActualizado?.(confirmandoEliminarDefinitivo.numeroCompleto, { estado: "INHABILITADA" }); setConfirmandoEliminarDefinitivo(null); }}
+                className="flex-1 rounded-lg bg-rose-600 px-4 py-3 text-sm font-semibold text-white hover:bg-rose-700"
+              >
+                Sí, eliminar definitivamente
               </button>
             </div>
           </div>
