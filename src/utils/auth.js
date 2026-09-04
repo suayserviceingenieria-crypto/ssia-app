@@ -52,11 +52,13 @@ export async function verificarClave(claveIngresada, hashAlmacenado) {
 // ROLES
 // ============================================================================
 // modulos: null = acceso a todos los módulos. Una lista = solo esos.
-// soloLectura: true = puede ver todo pero no crear/editar/eliminar nada.
+// soloLectura: true = puede ver todo pero no crear/editar/eliminar nada,
+// EXCEPTO en los módulos listados en modulosEditables (si los hay) — ahí
+// sí puede crear/editar/eliminar como si no tuviera solo lectura.
 export const ROLES = [
   { id: "ESTRATEGICA", label: "Gestión Estratégica", descripcion: "Acceso completo — Alta Dirección", modulos: null, soloLectura: false },
   { id: "COMERCIAL", label: "Gestión Comercial", descripcion: "Cotizaciones y terceros", modulos: ["comercial"], soloLectura: false },
-  { id: "EVALUACION", label: "Seguimiento y Evaluación", descripcion: "Ve todo, no edita — revisión gerencial", modulos: null, soloLectura: true },
+  { id: "EVALUACION", label: "Seguimiento y Evaluación", descripcion: "Ve todo; puede elaborar cotizaciones y gestionar clientes — el resto es de solo consulta", modulos: null, soloLectura: true, modulosEditables: ["cotizaciones", "terceros"] },
 ];
 
 // ============================================================================

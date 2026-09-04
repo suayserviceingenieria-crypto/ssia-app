@@ -16,7 +16,7 @@ import * as XLSX from "xlsx";
 import {
   ClipboardList, FileText, Briefcase, PiggyBank, Factory, LayoutDashboard,
   Plus, X, TrendingUp, TrendingDown, Wallet, ShoppingCart, Receipt, Percent, Users, Package,
-  Calendar, Settings2, AlertTriangle, CheckCircle2, FileDown, Mail, Eye, ArrowRight, Gauge, Award, ChevronDown, Phone, Pencil, Trash2, Copy, UploadCloud
+  Calendar, Settings2, AlertTriangle, CheckCircle2, FileDown, Mail, Eye, ArrowRight, Gauge, Award, ChevronDown, Phone, Pencil, Trash2, Copy, UploadCloud, Search
 } from "lucide-react";
 
 const fmt = (n) => new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(n || 0);
@@ -582,6 +582,16 @@ export default function AppCompleta() {
   function puedeVer(id) {
     if (!rolActual) return false;
     return !rolActual.modulos || rolActual.modulos.includes(id);
+  }
+
+  // Igual que puedeVer, pero para permiso de escritura: un rol de solo
+  // lectura puede tener excepciones puntuales (modulosEditables) donde sí
+  // puede crear/editar/eliminar — hoy, Seguimiento y Evaluación con
+  // Cotizaciones. El resto de módulos de ese rol siguen bloqueados.
+  function puedeEditar(id) {
+    if (!rolActual) return false;
+    if (!rolActual.soloLectura) return true;
+    return (rolActual.modulosEditables || []).includes(id);
   }
 
   // Seguridad: corrige la vista según lo que el rol puede ver, cada vez que
@@ -1185,8 +1195,8 @@ export default function AppCompleta() {
       <style>{`
         @media print {
           body * { visibility: hidden; }
-          .cot-print, .cot-print * { visibility: visible; }
-          .cot-print { position: fixed; top: 0; left: 0; width: 100%; }
+          .cot-print, .cot-print *, .liq-print, .liq-print * { visibility: visible; }
+          .cot-print, .liq-print { position: fixed; top: 0; left: 0; width: 100%; }
           .no-print { display: none !important; }
           /* Sin esto, los navegadores ocultan los fondos de color al
              imprimir por defecto (para ahorrar tinta) — con esto, el
@@ -1207,7 +1217,11 @@ export default function AppCompleta() {
             <p className="text-xs font-medium text-slate-700">{sesion.nombreCompleto}</p>
             <p className="text-[10px] text-slate-500">{rolActual.label}</p>
           </div>
-          {rolActual.soloLectura && <p className="mt-1 text-[10px] text-amber-600">Modo de solo lectura</p>}
+          {rolActual.soloLectura && (
+            <p className="mt-1 text-[10px] text-amber-600">
+              Modo de solo lectura{rolActual.modulosEditables?.length ? ` (excepto ${rolActual.modulosEditables.join(", ")})` : ""}
+            </p>
+          )}
           <button onClick={() => { cerrarSesion(); setSesion(null); }} className="mt-1.5 text-[10px] font-medium text-slate-400 hover:text-slate-600 hover:underline">Cerrar sesión</button>
         </div>
         {NAV.map((n) => {
@@ -1256,7 +1270,7 @@ export default function AppCompleta() {
           {rolActual.soloLectura && (
             <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
               <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="5" y="11" width="14" height="9" rx="1.5" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
-              Estás en modo <span className="font-semibold">Seguimiento y Evaluación</span> — puedes consultar toda la información, pero el registro de nuevas operaciones está bloqueado.
+              Estás en modo <span className="font-semibold">Seguimiento y Evaluación</span> — puedes consultar toda la información; el registro de nuevas operaciones está bloqueado, excepto en Comercial → Cotizaciones y Comercial → Terceros, donde sí puedes elaborar cotizaciones y gestionar clientes.
             </div>
           )}
           {vista === "registro" && puedeVer("registro") && (
@@ -1296,7 +1310,7 @@ export default function AppCompleta() {
             <VistaComercial
               cotizaciones={cotizaciones} crearCotizacionEnBD={crearCotizacionEnBD} actualizarCotizacionEnBD={actualizarCotizacionEnBD} eliminarCotizacionEnBD={eliminarCotizacionEnBD}
               proyectos={proyectos} crearProyecto={crearProyecto} cliente={cliente} clientes={clientes} crearCliente={crearCliente} operaciones={operaciones}
-              soloLectura={rolActual.soloLectura} nit={nit}
+              soloLectura={rolActual.soloLectura} soloLecturaCotizaciones={!puedeEditar("cotizaciones")} soloLecturaTerceros={!puedeEditar("terceros")} nit={nit}
               onGuardada={(q) => sincronizarConGraph(GraphSync.sincronizarCotizacion, q)}
               onItemCatalogoCreado={(item) => sincronizarConGraph(GraphSync.sincronizarItemCatalogo, item)}
               onPdfGenerado={(cotizacion, blob) => sincronizarConGraph(GraphSync.subirPdfCotizacion, cotizacion, blob)}
@@ -1312,7 +1326,7 @@ export default function AppCompleta() {
             />
           )}
           {vista === "cotizaciones" && puedeVer("cotizaciones") && (
-            <VistaCotizaciones cotizaciones={cotizaciones} crearCotizacionEnBD={crearCotizacionEnBD} actualizarCotizacionEnBD={actualizarCotizacionEnBD} eliminarCotizacionEnBD={eliminarCotizacionEnBD} proyectos={proyectos} crearProyecto={crearProyecto} cliente={cliente} clientes={clientes} crearCliente={crearCliente} operaciones={operaciones} soloLectura={rolActual.soloLectura} nit={nit} onGuardada={(q) => sincronizarConGraph(GraphSync.sincronizarCotizacion, q)} onItemCatalogoCreado={(item) => sincronizarConGraph(GraphSync.sincronizarItemCatalogo, item)} onPdfGenerado={(cotizacion, blob) => sincronizarConGraph(GraphSync.subirPdfCotizacion, cotizacion, blob)} onEstadoCotizacionActualizado={(numeroCompleto, cambios) => sincronizarConGraph(GraphSync.actualizarEstadoCotizacionEnGraph, numeroCompleto, cambios)} onCancelarProyecto={cancelarProyectoDeCotizacion} />
+            <VistaCotizaciones cotizaciones={cotizaciones} crearCotizacionEnBD={crearCotizacionEnBD} actualizarCotizacionEnBD={actualizarCotizacionEnBD} eliminarCotizacionEnBD={eliminarCotizacionEnBD} proyectos={proyectos} crearProyecto={crearProyecto} cliente={cliente} clientes={clientes} crearCliente={crearCliente} operaciones={operaciones} soloLectura={!puedeEditar("cotizaciones")} nit={nit} onGuardada={(q) => sincronizarConGraph(GraphSync.sincronizarCotizacion, q)} onItemCatalogoCreado={(item) => sincronizarConGraph(GraphSync.sincronizarItemCatalogo, item)} onPdfGenerado={(cotizacion, blob) => sincronizarConGraph(GraphSync.subirPdfCotizacion, cotizacion, blob)} onEstadoCotizacionActualizado={(numeroCompleto, cambios) => sincronizarConGraph(GraphSync.actualizarEstadoCotizacionEnGraph, numeroCompleto, cambios)} onCancelarProyecto={cancelarProyectoDeCotizacion} />
           )}
           {vista === "proyectos" && puedeVer("proyectos") && <VistaProyectos proyectos={proyectosConCosteo} cliente={cliente} proveedor={proveedor} crearProyectoDesdeOC={crearProyectoDesdeOC} eliminarProyectoEnBD={eliminarProyectoEnBD} clientes={clientes} crearCliente={crearCliente} operaciones={operaciones} actualizarOperacion={actualizarOperacion} registrarOperacion={registrarOperacion} colaboradores={colaboradores} proveedores={proveedores} crearProveedor={crearProveedor} ordenesProduccion={ordenesProduccion} productosTerminados={productosTerminados} costosPorOrden={costosPorOrden} soloLectura={rolActual.soloLectura} onExportar={(filas) => sincronizarConGraph(GraphSync.sincronizarProyectosCompleto, filas)} onPdfInformeListo={(nombre, blob) => sincronizarConGraph(GraphSync.subirPdfInforme, nombre, blob)} />}
           {vista === "presupuesto" && puedeVer("presupuesto") && <VistaPresupuesto costos={costosPresupuesto} crearCostoEnBD={crearCostoEnBD} actualizarCostoEnBD={actualizarCostoEnBD} eliminarCostoEnBD={eliminarCostoEnBD} proyectos={proyectosConCosteo} operaciones={operaciones} colaboradores={colaboradores} soloLectura={rolActual.soloLectura} onPdfInformeListo={(nombre, blob) => sincronizarConGraph(GraphSync.subirPdfInforme, nombre, blob)} />}
@@ -1361,11 +1375,11 @@ export default function AppCompleta() {
               eliminarCliente={eliminarCliente}
               eliminarProveedor={eliminarProveedor}
               operaciones={operaciones}
-              soloLectura={rolActual.soloLectura}
+              soloLectura={!puedeEditar("terceros")}
               onExportar={() => sincronizarConGraph(GraphSync.sincronizarTercerosCompleto, clientes, proveedores)}
             />
           )}
-          {vista === "cxc" && puedeVer("cxc") && <VistaCXC carteraPorCliente={carteraPorCliente} ventasPendientes={ventasPendientes} cliente={cliente} clienteInfo={clienteInfo} registrarOperacion={registrarOperacion} operaciones={operaciones} actualizarOperacion={actualizarOperacion} eliminarOperacion={eliminarOperacion} soloLectura={rolActual.soloLectura} onExportar={(filas) => sincronizarConGraph(GraphSync.sincronizarCarteraCompleto, filas)} onPdfCobroPagoListo={(operacion, tercero, blob) => sincronizarConGraph(GraphSync.subirPdfComprobanteMovimiento, operacion, tercero, blob)} />}
+          {vista === "cxc" && puedeVer("cxc") && <VistaCXC carteraPorCliente={carteraPorCliente} ventasPendientes={ventasPendientes} cliente={cliente} clienteInfo={clienteInfo} registrarOperacion={registrarOperacion} operaciones={operaciones} actualizarOperacion={actualizarOperacion} eliminarOperacion={eliminarOperacion} soloLectura={rolActual.soloLectura} onExportar={(filas) => sincronizarConGraph(GraphSync.sincronizarCarteraCompleto, filas)} onPdfCobroPagoListo={(operacion, tercero, blob) => sincronizarConGraph(GraphSync.subirPdfComprobanteMovimiento, operacion, tercero, blob)} onPdfInformeListo={(nombre, blob) => sincronizarConGraph(GraphSync.subirPdfInforme, nombre, blob)} onExcelInformeListo={(nombre, blob) => sincronizarConGraph(GraphSync.subirExcelInforme, nombre, blob)} />}
           {vista === "cxp" && puedeVer("cxp") && (
             <VistaCXP
               cxpPorProveedor={cxpPorProveedor}
@@ -1385,6 +1399,8 @@ export default function AppCompleta() {
               proveedores={proveedores} crearProveedor={crearProveedor} actualizarProveedor={actualizarProveedor} eliminarProveedor={eliminarProveedor}
               onExportarProveedores={() => sincronizarConGraph(GraphSync.sincronizarTercerosCompleto, clientes, proveedores)}
               onPdfCobroPagoListo={(operacion, tercero, blob) => sincronizarConGraph(GraphSync.subirPdfComprobanteMovimiento, operacion, tercero, blob)}
+              onPdfInformeListo={(nombre, blob) => sincronizarConGraph(GraphSync.subirPdfInforme, nombre, blob)}
+              onExcelInformeListo={(nombre, blob) => sincronizarConGraph(GraphSync.subirExcelInforme, nombre, blob)}
             />
           )}
           {vista === "indicadores" && puedeVer("indicadores") && <VistaIndicadores indicadores={indicadores} carteraPorCliente={carteraPorCliente} cxpPorProveedor={cxpPorProveedor} distribucionGastosGenerales={distribucionGastosGenerales} pctGastosProyectos={pctGastosProyectos} pctGastosProduccion={pctGastosProduccion} pendientesPorAsignarMes={pendientesPorAsignarMes} onPdfInformeListo={(nombre, blob) => sincronizarConGraph(GraphSync.subirPdfInforme, nombre, blob)} />}
@@ -1425,6 +1441,8 @@ export default function AppCompleta() {
               pctGastosProduccion={pctGastosProduccion}
               pendientesPorAsignarMes={pendientesPorAsignarMes}
               cotizacionesSinFacturar={cotizacionesSinFacturar}
+              cotizaciones={cotizaciones}
+              indicadores={indicadores}
               ordenesProduccion={ordenesProduccion}
               productosTerminados={productosTerminados}
               actualizarOperacion={actualizarOperacion}
@@ -2783,6 +2801,31 @@ function EstadoCuentaCliente({ clienteId, nombreCliente, infoCliente, operacione
   const totalCobradoGeneral = facturas.reduce((s, f) => s + f.totalCobrado, 0);
   const totalSaldo = facturas.reduce((s, f) => s + f.saldo, 0);
 
+  function exportarEstadoCuentaExcel() {
+    const filas = facturas.map((f) => ({
+      Fecha: f.fecha, "N.° factura": f.numeroFacturaElectronica || "—", Concepto: f.concepto,
+      "Valor + IVA": f.valor + f.iva, Retenciones: f.totalRete, Abonado: f.totalCobrado, Saldo: f.saldo,
+    }));
+    filas.push({ Fecha: "", "N.° factura": "", Concepto: "TOTAL", "Valor + IVA": totalFacturado, Retenciones: totalRetenido, Abonado: totalCobradoGeneral, Saldo: totalSaldo });
+    const ws = XLSX.utils.json_to_sheet(filas);
+    ws["!cols"] = [{ wch: 12 }, { wch: 16 }, { wch: 32 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 14 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Estado de cuenta");
+
+    const filasAbonos = [];
+    facturas.forEach((f) => {
+      f.cobros.forEach((c) => {
+        filasAbonos.push({ "N.° factura": f.numeroFacturaElectronica || "—", "Fecha factura": f.fecha, "Fecha abono": c.fecha, "Valor abonado": c.valor });
+      });
+    });
+    const wsAbonos = XLSX.utils.json_to_sheet(filasAbonos);
+    wsAbonos["!cols"] = [{ wch: 16 }, { wch: 13 }, { wch: 13 }, { wch: 14 }];
+    XLSX.utils.book_append_sheet(wb, wsAbonos, "Abonos");
+
+    const nombreArchivo = (nombreCliente || "cliente").replace(/[/:*?"<>|]/g, "-");
+    XLSX.writeFile(wb, `EstadoCuenta_${nombreArchivo}_${hoy()}.xlsx`);
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
       <div className="liq-print max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
@@ -2839,6 +2882,7 @@ function EstadoCuentaCliente({ clienteId, nombreCliente, infoCliente, operacione
         </div>
 
         <div className="no-print mt-5 flex gap-2">
+          <button onClick={exportarEstadoCuentaExcel} disabled={!facturas.length} className="flex items-center gap-1.5 rounded-lg border border-green-300 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 hover:bg-green-100 disabled:opacity-40"><FileDown size={14} /> Excel</button>
           <button onClick={() => window.print()} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white hover:bg-green-900"><FileDown size={14} /> PDF</button>
           <button onClick={onCerrar} className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600"><X size={16} /></button>
         </div>
@@ -2862,6 +2906,31 @@ function EstadoCuentaProveedor({ proveedorId, nombreProveedor, infoProveedor, op
   const totalRetenido = facturas.reduce((s, f) => s + f.totalRete, 0);
   const totalPagadoGeneral = facturas.reduce((s, f) => s + f.totalPagado, 0);
   const totalSaldo = facturas.reduce((s, f) => s + f.saldo, 0);
+
+  function exportarEstadoCuentaExcel() {
+    const filas = facturas.map((f) => ({
+      Fecha: f.fecha, "N.° factura / cta. cobro": f.numeroFacturaProveedor || "—", Concepto: f.concepto,
+      "Valor + IVA": f.valor + f.iva, Retenciones: f.totalRete, Pagado: f.totalPagado, Saldo: f.saldo,
+    }));
+    filas.push({ Fecha: "", "N.° factura / cta. cobro": "", Concepto: "TOTAL", "Valor + IVA": totalFacturado, Retenciones: totalRetenido, Pagado: totalPagadoGeneral, Saldo: totalSaldo });
+    const ws = XLSX.utils.json_to_sheet(filas);
+    ws["!cols"] = [{ wch: 12 }, { wch: 20 }, { wch: 32 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 14 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Estado de cuenta");
+
+    const filasPagos = [];
+    facturas.forEach((f) => {
+      f.pagos.forEach((p) => {
+        filasPagos.push({ "N.° factura / cta. cobro": f.numeroFacturaProveedor || "—", "Fecha factura": f.fecha, "Fecha pago": p.fecha, "Valor pagado": p.valor });
+      });
+    });
+    const wsPagos = XLSX.utils.json_to_sheet(filasPagos);
+    wsPagos["!cols"] = [{ wch: 20 }, { wch: 13 }, { wch: 13 }, { wch: 14 }];
+    XLSX.utils.book_append_sheet(wb, wsPagos, "Pagos");
+
+    const nombreArchivo = (nombreProveedor || "proveedor").replace(/[/:*?"<>|]/g, "-");
+    XLSX.writeFile(wb, `EstadoCuenta_${nombreArchivo}_${hoy()}.xlsx`);
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
@@ -2919,6 +2988,7 @@ function EstadoCuentaProveedor({ proveedorId, nombreProveedor, infoProveedor, op
         </div>
 
         <div className="no-print mt-5 flex gap-2">
+          <button onClick={exportarEstadoCuentaExcel} disabled={!facturas.length} className="flex items-center gap-1.5 rounded-lg border border-green-300 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 hover:bg-green-100 disabled:opacity-40"><FileDown size={14} /> Excel</button>
           <button onClick={() => window.print()} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white hover:bg-green-900"><FileDown size={14} /> PDF</button>
           <button onClick={onCerrar} className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600"><X size={16} /></button>
         </div>
@@ -3416,7 +3486,7 @@ function FilaComprobante({ label, valor }) {
 // y conectarse a Microsoft 365 (la conexión vive aquí dentro, no en
 // Calendario, que este rol no puede ver).
 function VistaComercial(props) {
-  const { cotizaciones, clientes, cliente, metaVentas, setMetaVentas, soloLectura, onTareaCreada, onTareaActualizada, onEventoTareaEliminado, actualizarCotizacionEnBD, crearProyecto, proyectos, onCancelarProyecto, onEstadoCotizacionActualizado } = props;
+  const { cotizaciones, clientes, cliente, metaVentas, setMetaVentas, soloLectura, soloLecturaCotizaciones, soloLecturaTerceros, onTareaCreada, onTareaActualizada, onEventoTareaEliminado, actualizarCotizacionEnBD, crearProyecto, proyectos, onCancelarProyecto, onEstadoCotizacionActualizado } = props;
   const inputCls = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-600";
   const labelCls = "mb-1 block text-xs font-medium text-slate-600";
   const [pestana, setPestana] = useState("dashboard");
@@ -3955,8 +4025,8 @@ function VistaComercial(props) {
         </div>
       )}
 
-      {pestana === "cotizaciones" && <VistaCotizaciones {...props} />}
-      {pestana === "terceros" && <VistaTerceros {...props} soloClientes />}
+      {pestana === "cotizaciones" && <VistaCotizaciones {...props} soloLectura={soloLecturaCotizaciones ?? soloLectura} />}
+      {pestana === "terceros" && <VistaTerceros {...props} soloClientes soloLectura={soloLecturaTerceros ?? soloLectura} />}
 
       {tareaEnCreacion && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
@@ -4056,6 +4126,27 @@ function VistaCotizaciones({ cotizaciones, crearCotizacionEnBD, actualizarCotiza
   const [nuevoItemCatalogo, setNuevoItemCatalogo] = useState(null); // { descripcion, unidad, precio } — nuevo desde la vista de catálogo
   const pdfContenedorRef = useRef(null); // nodo del DOM de la plantilla del PDF en pantalla — lo usan tanto la descarga manual como la subida a OneDrive
   const [descargandoPdf, setDescargandoPdf] = useState(false);
+  // Búsqueda de cotizaciones: por cliente, descripción/referencia, número,
+  // fecha o NIT/identificación — sin importar tildes ni mayúsculas.
+  const [busquedaCotizaciones, setBusquedaCotizaciones] = useState("");
+  function normalizarBusqueda(texto) {
+    return (texto ?? "")
+      .toString()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .trim();
+  }
+  function coincideBusquedaCotizacion(q) {
+    const termino = normalizarBusqueda(busquedaCotizaciones);
+    if (!termino) return true;
+    const infoCliente = clientes.find((c) => c.id === q.clienteId);
+    const campos = [
+      `${q.numero}-${q.revision}`, q.numero, cliente(q.clienteId), q.referencia,
+      q.fecha, infoCliente?.nit,
+    ];
+    return campos.some((campo) => normalizarBusqueda(campo).includes(termino));
+  }
 
   async function descargarPdf() {
     if (!pdfContenedorRef.current || !cotizacionPdf) return;
@@ -4412,6 +4503,19 @@ function VistaCotizaciones({ cotizaciones, crearCotizacionEnBD, actualizarCotiza
           </div>
           <p className="mb-4 text-[11px] text-slate-400">El Excel es un respaldo de datos para uso interno (sin el formato a color) — para enviar al cliente, usa el PDF de cada cotización, que sí trae el membrete y los colores completos.</p>
 
+          <div className="relative mb-3">
+            <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              value={busquedaCotizaciones}
+              onChange={(e) => setBusquedaCotizaciones(e.target.value)}
+              placeholder="Buscar por cliente, descripción, número, fecha o NIT/identificación..."
+              className="w-full rounded-lg border border-slate-300 py-2 pl-9 pr-8 text-sm focus:border-green-500 focus:outline-none"
+            />
+            {busquedaCotizaciones && (
+              <button onClick={() => setBusquedaCotizaciones("")} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><X size={15} /></button>
+            )}
+          </div>
+
           <div className="space-y-2">
             {(() => {
               // Una tarjeta principal por número de cotización: la versión
@@ -4431,7 +4535,7 @@ function VistaCotizaciones({ cotizaciones, crearCotizacionEnBD, actualizarCotiza
                   numerosVistos.add(q.numero);
                   return true;
                 });
-            })().map((q) => {
+            })().filter(coincideBusquedaCotizacion).map((q) => {
               const numeroCompleto = `${q.numero}-${q.revision}`;
               const versionesAnteriores = cotizaciones.filter((v) => v.numero === q.numero && v.id !== q.id).sort((a, b) => b.revision - a.revision);
               return (
@@ -5983,7 +6087,7 @@ function VistaTerceros({ clientes, proveedores, crearCliente, crearProveedor, ac
   );
 }
 
-function VistaCXC({ carteraPorCliente, ventasPendientes, cliente, clienteInfo, registrarOperacion, operaciones, actualizarOperacion, eliminarOperacion, soloLectura, onExportar, onPdfCobroPagoListo }) {
+function VistaCXC({ carteraPorCliente, ventasPendientes, cliente, clienteInfo, registrarOperacion, operaciones, actualizarOperacion, eliminarOperacion, soloLectura, onExportar, onPdfCobroPagoListo, onPdfInformeListo, onExcelInformeListo }) {
   const [cobrando, setCobrando] = useState(null); // la venta que se está cobrando/abonando, o null
   const [viendoMovimientos, setViendoMovimientos] = useState(null); // factura cuyos cobros se están listando
   const [viendoComprobante, setViendoComprobante] = useState(null); // { operacion, tercero, factura } a imprimir
@@ -6010,6 +6114,68 @@ function VistaCXC({ carteraPorCliente, ventasPendientes, cliente, clienteInfo, r
     XLSX.writeFile(wb, `Cartera_${hoy()}.xlsx`);
   }
 
+  // ==================== ESTADO DE CUENTA ACUMULADO (CxC) ====================
+  // Consolida TODOS los clientes en un solo Excel/PDF — a diferencia del
+  // Estado de cuenta individual (por cliente), este es el que pide
+  // contabilidad/gerencia para ver de un vistazo toda la cartera, con su
+  // antigüedad, y que además queda respaldado en OneDrive.
+  const [viendoEstadoCuentaAcumulado, setViendoEstadoCuentaAcumulado] = useState(false);
+  const [generandoPdfAcumuladoCxC, setGenerandoPdfAcumuladoCxC] = useState(false);
+  const refEstadoCuentaAcumuladoCxC = useRef(null);
+
+  function exportarEstadoCuentaAcumuladoExcel() {
+    const filasResumen = carteraPorCliente.map((g) => ({ Cliente: g.nombre, Total: g.total, "Al día": g.alDia, Vencida: g.vencida }));
+    filasResumen.push({
+      Cliente: "TOTAL GENERAL",
+      Total: carteraPorCliente.reduce((s, g) => s + g.total, 0),
+      "Al día": carteraPorCliente.reduce((s, g) => s + g.alDia, 0),
+      Vencida: carteraPorCliente.reduce((s, g) => s + g.vencida, 0),
+    });
+    const wsResumen = XLSX.utils.json_to_sheet(filasResumen);
+    wsResumen["!cols"] = [{ wch: 30 }, { wch: 16 }, { wch: 16 }, { wch: 16 }];
+
+    const filasDetalle = ventasPendientes.map((v) => ({
+      Cliente: cliente(v.clienteId), Fecha: v.fecha, "N.° factura": v.numeroFacturaElectronica || "", Concepto: v.concepto,
+      "Valor + IVA": v.valor + v.iva, Retenciones: (v.retencionFuente || 0) + (v.retencionIca || 0) + (v.retencionIva || 0),
+      Pendiente: v.pendiente, Vence: v.fechaVencimiento || "Contado", Antigüedad: v.antiguedad,
+    }));
+    const wsDetalle = XLSX.utils.json_to_sheet(filasDetalle);
+    wsDetalle["!cols"] = [{ wch: 28 }, { wch: 12 }, { wch: 16 }, { wch: 32 }, { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 12 }];
+
+    const wsAntiguedad = XLSX.utils.json_to_sheet(resumenPorTramo(ventasPendientes).map((r) => ({ Tramo: r.tramo, Total: r.total })));
+    wsAntiguedad["!cols"] = [{ wch: 16 }, { wch: 16 }];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, wsResumen, "Resumen por cliente");
+    XLSX.utils.book_append_sheet(wb, wsDetalle, "Detalle de facturas");
+    XLSX.utils.book_append_sheet(wb, wsAntiguedad, "Antigüedad");
+    XLSX.writeFile(wb, `EstadoCuentaCxC_Acumulado_${hoy()}.xlsx`);
+
+    const buffer = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+    onExcelInformeListo?.("EstadoCuentaCxC_Acumulado", new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+  }
+
+  async function descargarEstadoCuentaAcumuladoPdf() {
+    if (!refEstadoCuentaAcumuladoCxC.current) return;
+    setGenerandoPdfAcumuladoCxC(true);
+    try {
+      const blob = await generarPdfDesdeElemento(refEstadoCuentaAcumuladoCxC.current);
+      const url = URL.createObjectURL(blob);
+      const enlace = document.createElement("a");
+      enlace.href = url;
+      enlace.download = `EstadoCuentaCxC_Acumulado_${hoy()}.pdf`;
+      document.body.appendChild(enlace);
+      enlace.click();
+      document.body.removeChild(enlace);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("[Estado de cuenta acumulado] No se pudo generar el PDF:", error);
+      alert("No se pudo generar el PDF: " + (error?.message || String(error)));
+    } finally {
+      setGenerandoPdfAcumuladoCxC(false);
+    }
+  }
+
   function guardarEdicionMovimiento() {
     if (!editandoMovimiento || !Number(editandoMovimiento.valor)) return;
     actualizarOperacion(editandoMovimiento.id, { valor: Number(editandoMovimiento.valor), fecha: editandoMovimiento.fecha, cuentaId: editandoMovimiento.cuentaId });
@@ -6034,9 +6200,12 @@ function VistaCXC({ carteraPorCliente, ventasPendientes, cliente, clienteInfo, r
 
   return (
     <div>
-      <div className="mb-1 flex items-center justify-between">
+      <div className="mb-1 flex items-center justify-between gap-2">
         <h1 className="text-xl font-semibold">Cuentas por cobrar</h1>
-        <button onClick={exportarCarteraExcel} disabled={!ventasPendientes.length} className="flex items-center gap-1.5 rounded-lg border border-green-300 bg-green-50 px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-100 disabled:opacity-40"><FileDown size={13} /> Excel</button>
+        <div className="flex gap-2">
+          <button onClick={exportarCarteraExcel} disabled={!ventasPendientes.length} className="flex items-center gap-1.5 rounded-lg border border-green-300 bg-green-50 px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-100 disabled:opacity-40"><FileDown size={13} /> Excel</button>
+          <button onClick={() => setViendoEstadoCuentaAcumulado(true)} className="flex items-center gap-1.5 rounded-lg bg-green-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-900"><FileDown size={13} /> Estado de cuenta acumulado</button>
+        </div>
       </div>
       <p className="mb-5 text-sm text-slate-500">Quién debe, y la edad de la cartera por cliente.</p>
 
@@ -6218,12 +6387,79 @@ function VistaCXC({ carteraPorCliente, ventasPendientes, cliente, clienteInfo, r
       {viendoEstadoCuenta && (
         <EstadoCuentaCliente clienteId={viendoEstadoCuenta.clienteId} nombreCliente={viendoEstadoCuenta.nombreCliente} infoCliente={clienteInfo(viendoEstadoCuenta.clienteId)} operaciones={operaciones} onCerrar={() => setViendoEstadoCuenta(null)} />
       )}
+
+      {viendoEstadoCuentaAcumulado && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
+            <div className="no-print mb-4 flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-slate-900">Estado de cuenta acumulado — Cuentas por cobrar</p>
+              <div className="flex shrink-0 gap-2">
+                <button onClick={exportarEstadoCuentaAcumuladoExcel} disabled={!ventasPendientes.length} className="flex items-center gap-1.5 rounded-lg border border-green-300 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 hover:bg-green-100 disabled:opacity-40"><FileDown size={14} /> Excel</button>
+                <button onClick={descargarEstadoCuentaAcumuladoPdf} disabled={generandoPdfAcumuladoCxC} className="flex items-center gap-1.5 rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-60"><FileDown size={14} /> {generandoPdfAcumuladoCxC ? "Generando…" : "PDF"}</button>
+                {onPdfInformeListo && <BotonSubirPdfOneDrive contenedorRef={refEstadoCuentaAcumuladoCxC} onSubir={(blob) => onPdfInformeListo("EstadoCuentaCxC_Acumulado", blob)} />}
+                <button onClick={() => setViendoEstadoCuentaAcumulado(false)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600"><X size={16} /></button>
+              </div>
+            </div>
+
+            <div ref={refEstadoCuentaAcumuladoCxC} className="p-1">
+              <div className="mb-4 border-b border-slate-200 pb-3 text-center">
+                <p className="text-sm font-semibold text-slate-900">SUA &amp; SERVICE INGENIERÍA S.A.S.</p>
+                <p className="text-xs text-slate-500">Estado de cuenta acumulado — Cuentas por cobrar</p>
+                <p className="mt-1 text-[11px] text-slate-400">Fecha de corte: {hoy()}</p>
+              </div>
+
+              <p className="mb-2 text-xs font-semibold uppercase text-slate-400">Antigüedad de cartera</p>
+              <div className="mb-4 grid grid-cols-3 gap-2 sm:grid-cols-5">
+                {resumenPorTramo(ventasPendientes).map((r) => (
+                  <div key={r.tramo} className="rounded-lg bg-slate-50 p-2 text-center">
+                    <p className="text-[10px] text-slate-400">{r.tramo}</p>
+                    <p className="text-xs font-semibold text-slate-900">{fmt(r.total)}</p>
+                  </div>
+                ))}
+              </div>
+
+              <p className="mb-2 text-xs font-semibold uppercase text-slate-400">Detalle por cliente</p>
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-300 text-slate-500">
+                    <th className="py-1 pr-2 font-medium">Cliente</th>
+                    <th className="py-1 pr-2 font-medium">Total</th>
+                    <th className="py-1 pr-2 font-medium">Al día</th>
+                    <th className="py-1 pr-2 font-medium">Vencida</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {carteraPorCliente.map((g) => (
+                    <tr key={g.nombre} className="border-b border-slate-100">
+                      <td className="py-1 pr-2">{g.nombre}</td>
+                      <td className="py-1 pr-2 font-medium">{fmt(g.total)}</td>
+                      <td className="py-1 pr-2 text-emerald-700">{fmt(g.alDia)}</td>
+                      <td className="py-1 pr-2 text-rose-600">{g.vencida > 0 ? fmt(g.vencida) : "—"}</td>
+                    </tr>
+                  ))}
+                  {carteraPorCliente.length === 0 && (
+                    <tr><td colSpan={4} className="py-3 text-center text-slate-400">Sin cartera pendiente.</td></tr>
+                  )}
+                </tbody>
+                <tfoot>
+                  <tr className="border-t border-slate-300 font-semibold text-slate-900">
+                    <td className="py-1.5 pr-2">TOTAL GENERAL</td>
+                    <td className="py-1.5 pr-2">{fmt(carteraPorCliente.reduce((s, g) => s + g.total, 0))}</td>
+                    <td className="py-1.5 pr-2 text-emerald-700">{fmt(carteraPorCliente.reduce((s, g) => s + g.alDia, 0))}</td>
+                    <td className="py-1.5 pr-2 text-rose-600">{fmt(carteraPorCliente.reduce((s, g) => s + g.vencida, 0))}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 // ==================== CUENTAS X PAGAR ====================
-function VistaCXP({ cxpPorProveedor, comprasPendientes, liquidacionesPendientes, provisionPrestaciones, proveedor, proveedorInfo, pasivosFinancieros, crearPasivoFinancieroEnBD, registrarOperacion, operaciones, actualizarOperacion, eliminarOperacion, soloLectura, onExportar, proveedores, crearProveedor, actualizarProveedor, eliminarProveedor, onExportarProveedores, onPdfCobroPagoListo }) {
+function VistaCXP({ cxpPorProveedor, comprasPendientes, liquidacionesPendientes, provisionPrestaciones, proveedor, proveedorInfo, pasivosFinancieros, crearPasivoFinancieroEnBD, registrarOperacion, operaciones, actualizarOperacion, eliminarOperacion, soloLectura, onExportar, proveedores, crearProveedor, actualizarProveedor, eliminarProveedor, onExportarProveedores, onPdfCobroPagoListo, onPdfInformeListo, onExcelInformeListo }) {
   const [pestanaPrincipal, setPestanaPrincipal] = useState("cxp"); // cxp | proveedores
   const [nuevo, setNuevo] = useState(null);
   const [pagando, setPagando] = useState(null); // la compra que se está pagando/abonando, o null
@@ -6273,6 +6509,67 @@ function VistaCXP({ cxpPorProveedor, comprasPendientes, liquidacionesPendientes,
         ["TOTAL", provisionPrestaciones.total],
       ],
     });
+  }
+
+  // ==================== ESTADO DE CUENTA ACUMULADO (CxP) ====================
+  // Igual que el de CxC, pero para todos los proveedores — un solo Excel/PDF
+  // con el resumen, el detalle factura por factura y la antigüedad, con
+  // respaldo en OneDrive.
+  const [viendoEstadoCuentaAcumulado, setViendoEstadoCuentaAcumulado] = useState(false);
+  const [generandoPdfAcumuladoCxP, setGenerandoPdfAcumuladoCxP] = useState(false);
+  const refEstadoCuentaAcumuladoCxP = useRef(null);
+
+  function exportarEstadoCuentaAcumuladoExcel() {
+    const filasResumen = cxpPorProveedor.map((g) => ({ Proveedor: g.nombre, Total: g.total, "Al día": g.alDia, Vencida: g.vencida }));
+    filasResumen.push({
+      Proveedor: "TOTAL GENERAL",
+      Total: cxpPorProveedor.reduce((s, g) => s + g.total, 0),
+      "Al día": cxpPorProveedor.reduce((s, g) => s + g.alDia, 0),
+      Vencida: cxpPorProveedor.reduce((s, g) => s + g.vencida, 0),
+    });
+    const wsResumen = XLSX.utils.json_to_sheet(filasResumen);
+    wsResumen["!cols"] = [{ wch: 30 }, { wch: 16 }, { wch: 16 }, { wch: 16 }];
+
+    const filasDetalle = comprasPendientes.map((c) => ({
+      Proveedor: proveedor(c.proveedorId), Fecha: c.fecha, "N.° factura/cta. cobro": c.numeroFacturaProveedor || "", Concepto: c.concepto,
+      "Valor + IVA": c.valor + c.iva, Retenciones: (c.retencionFuente || 0) + (c.retencionIca || 0) + (c.retencionIva || 0),
+      Pendiente: c.pendiente, Vence: c.fechaVencimiento || "Contado", Antigüedad: c.antiguedad,
+    }));
+    const wsDetalle = XLSX.utils.json_to_sheet(filasDetalle);
+    wsDetalle["!cols"] = [{ wch: 28 }, { wch: 12 }, { wch: 18 }, { wch: 32 }, { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 12 }];
+
+    const wsAntiguedad = XLSX.utils.json_to_sheet(resumenPorTramo(comprasPendientes).map((r) => ({ Tramo: r.tramo, Total: r.total })));
+    wsAntiguedad["!cols"] = [{ wch: 16 }, { wch: 16 }];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, wsResumen, "Resumen por proveedor");
+    XLSX.utils.book_append_sheet(wb, wsDetalle, "Detalle de facturas");
+    XLSX.utils.book_append_sheet(wb, wsAntiguedad, "Antigüedad");
+    XLSX.writeFile(wb, `EstadoCuentaCxP_Acumulado_${hoy()}.xlsx`);
+
+    const buffer = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+    onExcelInformeListo?.("EstadoCuentaCxP_Acumulado", new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+  }
+
+  async function descargarEstadoCuentaAcumuladoPdf() {
+    if (!refEstadoCuentaAcumuladoCxP.current) return;
+    setGenerandoPdfAcumuladoCxP(true);
+    try {
+      const blob = await generarPdfDesdeElemento(refEstadoCuentaAcumuladoCxP.current);
+      const url = URL.createObjectURL(blob);
+      const enlace = document.createElement("a");
+      enlace.href = url;
+      enlace.download = `EstadoCuentaCxP_Acumulado_${hoy()}.pdf`;
+      document.body.appendChild(enlace);
+      enlace.click();
+      document.body.removeChild(enlace);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("[Estado de cuenta acumulado] No se pudo generar el PDF:", error);
+      alert("No se pudo generar el PDF: " + (error?.message || String(error)));
+    } finally {
+      setGenerandoPdfAcumuladoCxP(false);
+    }
   }
 
   function guardarEdicionMovimiento() {
@@ -6332,9 +6629,12 @@ function VistaCXP({ cxpPorProveedor, comprasPendientes, liquidacionesPendientes,
         />
       ) : (
       <div>
-      <div className="mb-1 flex items-center justify-between">
+      <div className="mb-1 flex items-center justify-between gap-2">
         <h1 className="text-xl font-semibold">Cuentas por pagar</h1>
-        <button onClick={exportarCxpExcel} className="flex items-center gap-1.5 rounded-lg border border-green-300 bg-green-50 px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-100"><FileDown size={13} /> Excel</button>
+        <div className="flex gap-2">
+          <button onClick={exportarCxpExcel} className="flex items-center gap-1.5 rounded-lg border border-green-300 bg-green-50 px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-100"><FileDown size={13} /> Excel</button>
+          <button onClick={() => setViendoEstadoCuentaAcumulado(true)} className="flex items-center gap-1.5 rounded-lg bg-green-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-900"><FileDown size={13} /> Estado de cuenta acumulado</button>
+        </div>
       </div>
       <p className="mb-5 text-sm text-slate-500">A quién le debemos por operación, más los créditos y pasivos financieros — juntos alimentan los indicadores y el punto de equilibrio.</p>
 
@@ -6607,6 +6907,73 @@ function VistaCXP({ cxpPorProveedor, comprasPendientes, liquidacionesPendientes,
       })()}
       {viendoEstadoCuenta && (
         <EstadoCuentaProveedor proveedorId={viendoEstadoCuenta.proveedorId} nombreProveedor={viendoEstadoCuenta.nombreProveedor} infoProveedor={proveedorInfo(viendoEstadoCuenta.proveedorId)} operaciones={operaciones} onCerrar={() => setViendoEstadoCuenta(null)} />
+      )}
+
+      {viendoEstadoCuentaAcumulado && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
+            <div className="no-print mb-4 flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-slate-900">Estado de cuenta acumulado — Cuentas por pagar</p>
+              <div className="flex shrink-0 gap-2">
+                <button onClick={exportarEstadoCuentaAcumuladoExcel} disabled={!comprasPendientes.length} className="flex items-center gap-1.5 rounded-lg border border-green-300 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 hover:bg-green-100 disabled:opacity-40"><FileDown size={14} /> Excel</button>
+                <button onClick={descargarEstadoCuentaAcumuladoPdf} disabled={generandoPdfAcumuladoCxP} className="flex items-center gap-1.5 rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-60"><FileDown size={14} /> {generandoPdfAcumuladoCxP ? "Generando…" : "PDF"}</button>
+                {onPdfInformeListo && <BotonSubirPdfOneDrive contenedorRef={refEstadoCuentaAcumuladoCxP} onSubir={(blob) => onPdfInformeListo("EstadoCuentaCxP_Acumulado", blob)} />}
+                <button onClick={() => setViendoEstadoCuentaAcumulado(false)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600"><X size={16} /></button>
+              </div>
+            </div>
+
+            <div ref={refEstadoCuentaAcumuladoCxP} className="p-1">
+              <div className="mb-4 border-b border-slate-200 pb-3 text-center">
+                <p className="text-sm font-semibold text-slate-900">SUA &amp; SERVICE INGENIERÍA S.A.S.</p>
+                <p className="text-xs text-slate-500">Estado de cuenta acumulado — Cuentas por pagar</p>
+                <p className="mt-1 text-[11px] text-slate-400">Fecha de corte: {hoy()}</p>
+              </div>
+
+              <p className="mb-2 text-xs font-semibold uppercase text-slate-400">Antigüedad de cuentas por pagar</p>
+              <div className="mb-4 grid grid-cols-3 gap-2 sm:grid-cols-5">
+                {resumenPorTramo(comprasPendientes).map((r) => (
+                  <div key={r.tramo} className="rounded-lg bg-slate-50 p-2 text-center">
+                    <p className="text-[10px] text-slate-400">{r.tramo}</p>
+                    <p className="text-xs font-semibold text-slate-900">{fmt(r.total)}</p>
+                  </div>
+                ))}
+              </div>
+
+              <p className="mb-2 text-xs font-semibold uppercase text-slate-400">Detalle por proveedor</p>
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-300 text-slate-500">
+                    <th className="py-1 pr-2 font-medium">Proveedor</th>
+                    <th className="py-1 pr-2 font-medium">Total</th>
+                    <th className="py-1 pr-2 font-medium">Al día</th>
+                    <th className="py-1 pr-2 font-medium">Vencida</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cxpPorProveedor.map((g) => (
+                    <tr key={g.nombre} className="border-b border-slate-100">
+                      <td className="py-1 pr-2">{g.nombre}</td>
+                      <td className="py-1 pr-2 font-medium">{fmt(g.total)}</td>
+                      <td className="py-1 pr-2 text-emerald-700">{fmt(g.alDia)}</td>
+                      <td className="py-1 pr-2 text-rose-600">{g.vencida > 0 ? fmt(g.vencida) : "—"}</td>
+                    </tr>
+                  ))}
+                  {cxpPorProveedor.length === 0 && (
+                    <tr><td colSpan={4} className="py-3 text-center text-slate-400">Sin cuentas por pagar.</td></tr>
+                  )}
+                </tbody>
+                <tfoot>
+                  <tr className="border-t border-slate-300 font-semibold text-slate-900">
+                    <td className="py-1.5 pr-2">TOTAL GENERAL</td>
+                    <td className="py-1.5 pr-2">{fmt(cxpPorProveedor.reduce((s, g) => s + g.total, 0))}</td>
+                    <td className="py-1.5 pr-2 text-emerald-700">{fmt(cxpPorProveedor.reduce((s, g) => s + g.alDia, 0))}</td>
+                    <td className="py-1.5 pr-2 text-rose-600">{fmt(cxpPorProveedor.reduce((s, g) => s + g.vencida, 0))}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
+        </div>
       )}
       </div>
       )}
@@ -9261,7 +9628,7 @@ function VistaProduccion({ materiasPrimas, crearMateriaPrimaEnBD, productosTermi
 }
 
 // ==================== DASHBOARD ====================
-function VistaDashboard({ resumen, carteraPorCliente, cxpPorProveedor, provisionPrestaciones, liquidacionesPendientes, movimientosCaja, proyectos, operaciones, cliente, cuenta, distribucionGastosGenerales, pctGastosProyectos, pctGastosProduccion, pendientesPorAsignarMes, cotizacionesSinFacturar, ordenesProduccion, productosTerminados, actualizarOperacion, colaboradores, soloLectura, onPdfInformeListo }) {
+function VistaDashboard({ resumen, carteraPorCliente, cxpPorProveedor, provisionPrestaciones, liquidacionesPendientes, movimientosCaja, proyectos, operaciones, cliente, proveedor, cuenta, distribucionGastosGenerales, pctGastosProyectos, pctGastosProduccion, pendientesPorAsignarMes, cotizacionesSinFacturar, cotizaciones, indicadores, ordenesProduccion, productosTerminados, actualizarOperacion, colaboradores, soloLectura, onPdfInformeListo }) {
   const [panel, setPanel] = useState(null); // 'caja' | 'cartera' | 'cxp' | null
   const [viendoPendientes, setViendoPendientes] = useState(false);
   const [asignandoRapido, setAsignandoRapido] = useState(null); // { id, destino: "proyecto"|"orden", valor } — item que se está asignando
@@ -9274,11 +9641,138 @@ function VistaDashboard({ resumen, carteraPorCliente, cxpPorProveedor, provision
     setAsignandoRapido(null);
   }
 
+  // ==================== INFORME GERENCIAL MENSUAL ====================
+  // Consolida en un solo PDF lo que hoy está repartido en varias pantallas
+  // (resultado y recaudo del mes, comercial, cartera/CxP RECONSTRUIDA tal
+  // como estaba al cierre del mes elegido — no el saldo de hoy —, nómina,
+  // proyectos e indicadores clave) para que la alta dirección tenga, una
+  // vez al mes, una sola lectura con todo lo necesario para decidir, sin
+  // entrar módulo por módulo.
+  const [mesInformeGerencial, setMesInformeGerencial] = useState(hoy().slice(0, 7));
+  const [viendoInformeGerencial, setViendoInformeGerencial] = useState(false);
+  const [generandoInformeGerencial, setGenerandoInformeGerencial] = useState(false);
+  const refInformeGerencial = useRef(null);
+
+  function primerDiaMesSiguiente(mes) {
+    const [anio, mesNum] = mes.split("-").map(Number);
+    return new Date(Date.UTC(anio, mesNum, 1)).toISOString().slice(0, 10); // mesNum ya viene 1-based, así que como índice 0-based cae en el mes siguiente
+  }
+
+  // Reconstruye cartera o cuentas por pagar tal como estaban al CIERRE del
+  // mes seleccionado (no el saldo de hoy) — cruza cada factura con sus
+  // abonos/pagos, contando solo movimientos con fecha dentro o antes del
+  // mes de corte.
+  function saldosAlCierre(mes, tiposFactura, campoTercero, tipoAbono, nombreDe) {
+    const finMes = `${mes}-31`;
+    const inicioMesSiguiente = primerDiaMesSiguiente(mes);
+    const porTercero = {};
+    let total = 0;
+    let vencida = 0;
+    operaciones
+      .filter((o) => tiposFactura.includes(o.tipo) && o.fecha && o.fecha <= finMes)
+      .forEach((f) => {
+        const totalRete = (f.retencionFuente || 0) + (f.retencionIca || 0) + (f.retencionIva || 0);
+        const abonado = operaciones
+          .filter((o) => o.tipo === tipoAbono && String(o.relId) === f.id && o.fecha && o.fecha <= finMes)
+          .reduce((s, o) => s + o.valor, 0);
+        const saldo = f.valor + f.iva - totalRete - abonado;
+        if (saldo <= 0.5) return;
+        const nombre = nombreDe(f[campoTercero]);
+        porTercero[nombre] = (porTercero[nombre] || 0) + saldo;
+        total += saldo;
+        if (f.fechaVencimiento && f.fechaVencimiento < inicioMesSiguiente) vencida += saldo;
+      });
+    const porTerceroLista = Object.entries(porTercero).map(([nombre, valor]) => ({ nombre, total: valor })).sort((a, b) => b.total - a.total);
+    return { total, vencida, porTercero: porTerceroLista };
+  }
+
+  const informeGerencial = useMemo(() => {
+    const mes = mesInformeGerencial;
+    const enElMes = (o) => o.fecha && o.fecha.slice(0, 7) === mes;
+
+    const ventasMes = operaciones.filter((o) => o.tipo === "VENTA" && enElMes(o));
+    const comprasMes = operaciones.filter((o) => o.tipo === "COMPRA" && enElMes(o));
+    const gastosMes = operaciones.filter((o) => o.tipo === "GASTO" && enElMes(o));
+    const nominaMes = operaciones.filter((o) => o.tipo === "NOMINA" && enElMes(o));
+    const cobrosMes = operaciones.filter((o) => o.tipo === "COBRO" && enElMes(o));
+    const pagosMes = operaciones.filter((o) => o.tipo === "PAGO" && enElMes(o));
+
+    const totalVentas = ventasMes.reduce((s, o) => s + o.valor + o.iva, 0);
+    const totalCompras = comprasMes.reduce((s, o) => s + o.valor + o.iva, 0);
+    const totalGastos = gastosMes.reduce((s, o) => s + o.valor + o.iva, 0);
+    const totalNomina = nominaMes.reduce((s, o) => s + o.valor, 0);
+    const totalCostos = totalCompras + totalGastos + totalNomina;
+    const utilidadMes = totalVentas - totalCostos;
+    const margenMesPct = totalVentas ? (utilidadMes / totalVentas) * 100 : 0;
+
+    const totalCobrado = cobrosMes.reduce((s, o) => s + o.valor, 0);
+    const totalPagado = pagosMes.reduce((s, o) => s + o.valor, 0);
+
+    // Comercial: lo único verificable por fecha es cuándo se CREÓ cada
+    // cotización — el estado (ganada/perdida) es el ACTUAL, a la fecha de
+    // generación del informe (la app no guarda un histórico de cuándo
+    // cambió de estado), así que esto lee como "de lo cotizado este mes,
+    // cómo va a la fecha".
+    const cotizacionesDelMes = cotizaciones.filter((q) => q.fecha && q.fecha.slice(0, 7) === mes && q.estado !== "REEMPLAZADA");
+    const valorCotizadoMes = cotizacionesDelMes.reduce((s, q) => s + q.total, 0);
+    const ganadasDelMes = cotizacionesDelMes.filter((q) => q.estado === "GANADA");
+    const perdidasDelMes = cotizacionesDelMes.filter((q) => q.estado === "PERDIDA");
+    const enTramiteDelMes = cotizacionesDelMes.filter((q) => q.estado === "BORRADOR" || q.estado === "ENVIADA");
+    const decididasDelMes = ganadasDelMes.length + perdidasDelMes.length;
+    const tasaConversion = decididasDelMes ? (ganadasDelMes.length / decididasDelMes) * 100 : null;
+
+    const cartera = saldosAlCierre(mes, ["VENTA"], "clienteId", "COBRO", cliente);
+    const cxp = saldosAlCierre(mes, ["COMPRA", "GASTO"], "proveedorId", "PAGO", proveedor);
+
+    const colaboradoresPagadosIds = new Set(nominaMes.map((o) => o.colaboradorId));
+
+    const proyectosActivos = proyectos.filter((p) => p.estado !== "CANCELADA");
+    const proyectosNegativos = proyectosActivos.filter((p) => p.margen < 0);
+
+    return {
+      mes, totalVentas, totalCompras, totalGastos, totalNomina, totalCostos, utilidadMes, margenMesPct,
+      totalCobrado, totalPagado, variacionCaja: totalCobrado - totalPagado,
+      cotizacionesDelMes, valorCotizadoMes, ganadasDelMes, perdidasDelMes, enTramiteDelMes, tasaConversion,
+      cartera, cxp, colaboradoresPagados: colaboradoresPagadosIds.size,
+      proyectosActivos, proyectosNegativos,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mesInformeGerencial, operaciones, cotizaciones, proyectos, cliente, proveedor]);
+
+  async function descargarInformeGerencial() {
+    if (!refInformeGerencial.current) return;
+    setGenerandoInformeGerencial(true);
+    try {
+      const blob = await generarPdfDesdeElemento(refInformeGerencial.current);
+      const url = URL.createObjectURL(blob);
+      const enlace = document.createElement("a");
+      enlace.href = url;
+      enlace.download = `InformeGerencial_${mesInformeGerencial}.pdf`;
+      document.body.appendChild(enlace);
+      enlace.click();
+      document.body.removeChild(enlace);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("[Informe gerencial] No se pudo generar el PDF:", error);
+      alert("No se pudo generar el PDF: " + (error?.message || String(error)));
+    } finally {
+      setGenerandoInformeGerencial(false);
+    }
+  }
+
+  function nombreMesInforme(mes) {
+    const [anio, mesNum] = mes.split("-").map(Number);
+    return `${NOMBRES_MESES[mesNum - 1]} de ${anio}`;
+  }
+
   return (
     <div>
-      <div className="mb-1 flex items-center justify-between">
+      <div className="mb-1 flex items-center justify-between gap-2">
         <h1 className="text-xl font-semibold">Control de mando</h1>
-        <button onClick={() => setViendoInformeMando(true)} className="flex items-center gap-1.5 rounded-lg border border-green-300 bg-green-50 px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-100"><FileDown size={13} /> Informe (PDF)</button>
+        <div className="flex gap-2">
+          <button onClick={() => setViendoInformeMando(true)} className="flex items-center gap-1.5 rounded-lg border border-green-300 bg-green-50 px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-100"><FileDown size={13} /> Informe (PDF)</button>
+          <button onClick={() => setViendoInformeGerencial(true)} className="flex items-center gap-1.5 rounded-lg bg-green-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-900"><FileDown size={13} /> Informe gerencial mensual</button>
+        </div>
       </div>
       <p className="mb-5 text-sm text-slate-500">Haz clic en una tarjeta para ver de dónde sale el dato.</p>
 
@@ -9561,6 +10055,161 @@ function VistaDashboard({ resumen, carteraPorCliente, cxpPorProveedor, provision
               <button onClick={() => window.print()} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white hover:bg-green-900"><FileDown size={14} /> PDF</button>
               {onPdfInformeListo && <BotonSubirPdfOneDrive contenedorRef={refInformeMando} onSubir={(blob) => onPdfInformeListo("ControlDeMando", blob)} />}
               <button onClick={() => setViendoInformeMando(false)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600"><X size={16} /></button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {viendoInformeGerencial && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
+            <div className="no-print mb-4 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-slate-900">Informe gerencial mensual</p>
+                <label className="mt-1 flex items-center gap-2 text-xs text-slate-500">
+                  Mes:
+                  <input type="month" value={mesInformeGerencial} onChange={(e) => setMesInformeGerencial(e.target.value)} className="rounded border border-slate-300 px-2 py-1 text-xs" />
+                </label>
+              </div>
+              <div className="flex shrink-0 gap-2">
+                <button onClick={descargarInformeGerencial} disabled={generandoInformeGerencial} className="flex items-center gap-1.5 rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-60"><FileDown size={14} /> {generandoInformeGerencial ? "Generando…" : "Descargar PDF"}</button>
+                <button onClick={() => setViendoInformeGerencial(false)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600"><X size={16} /></button>
+              </div>
+            </div>
+
+            <div ref={refInformeGerencial} className="p-1">
+              <div className="mb-4 border-b border-slate-200 pb-3 text-center">
+                <p className="text-sm font-semibold text-slate-900">SUA &amp; SERVICE INGENIERÍA S.A.S.</p>
+                <p className="text-xs text-slate-500">Informe gerencial mensual — {nombreMesInforme(informeGerencial.mes)}</p>
+                <p className="mt-1 text-[11px] text-slate-400">Generado el {hoy()}</p>
+              </div>
+
+              <p className="mb-1 text-sm font-semibold">1. Resultado del mes</p>
+              <div className="mb-2 grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-4">
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Ventas facturadas</p><p className="font-semibold text-slate-900">{fmt(informeGerencial.totalVentas)}</p></div>
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Compras</p><p className="font-semibold text-slate-900">{fmt(informeGerencial.totalCompras)}</p></div>
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Gastos</p><p className="font-semibold text-slate-900">{fmt(informeGerencial.totalGastos)}</p></div>
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Nómina</p><p className="font-semibold text-slate-900">{fmt(informeGerencial.totalNomina)}</p></div>
+              </div>
+              <div className="mb-2 flex items-center justify-between rounded-lg border border-slate-200 p-2.5 text-sm">
+                <span className="font-medium text-slate-700">Utilidad del mes ({informeGerencial.margenMesPct.toFixed(1)}% de margen)</span>
+                <span className={`text-base font-bold ${informeGerencial.utilidadMes >= 0 ? "text-emerald-700" : "text-rose-700"}`}>{fmt(informeGerencial.utilidadMes)}</span>
+              </div>
+              <p className="mb-4 text-[11px] text-slate-500">{informeGerencial.utilidadMes >= 0 ? `La operación de ${nombreMesInforme(informeGerencial.mes)} dejó utilidad: lo facturado cubrió compras, gastos y nómina del mes.` : `${nombreMesInforme(informeGerencial.mes)} cerró en pérdida operativa: lo facturado no alcanzó a cubrir compras, gastos y nómina del mes.`}</p>
+
+              <p className="mb-1 text-sm font-semibold">2. Recaudo y pagos del mes</p>
+              <div className="mb-4 grid grid-cols-3 gap-x-4 gap-y-1.5 text-xs">
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Cobrado</p><p className="font-semibold text-emerald-700">{fmt(informeGerencial.totalCobrado)}</p></div>
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Pagado</p><p className="font-semibold text-rose-700">{fmt(informeGerencial.totalPagado)}</p></div>
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Variación neta de caja</p><p className={`font-semibold ${informeGerencial.variacionCaja >= 0 ? "text-emerald-700" : "text-rose-700"}`}>{fmt(informeGerencial.variacionCaja)}</p></div>
+              </div>
+
+              <p className="mb-1 text-sm font-semibold">3. Actividad comercial del mes</p>
+              <div className="mb-2 grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-4">
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Cotizaciones creadas</p><p className="font-semibold text-slate-900">{informeGerencial.cotizacionesDelMes.length}</p></div>
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Valor cotizado</p><p className="font-semibold text-slate-900">{fmt(informeGerencial.valorCotizadoMes)}</p></div>
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Ganadas / Perdidas</p><p className="font-semibold text-slate-900">{informeGerencial.ganadasDelMes.length} / {informeGerencial.perdidasDelMes.length}</p></div>
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Tasa de cierre</p><p className="font-semibold text-slate-900">{informeGerencial.tasaConversion === null ? "—" : `${informeGerencial.tasaConversion.toFixed(0)}%`}</p></div>
+              </div>
+              <p className="mb-4 text-[11px] text-slate-500">{informeGerencial.enTramiteDelMes.length} cotización(es) de este mes ({fmt(informeGerencial.enTramiteDelMes.reduce((s, q) => s + q.total, 0))}) siguen en trámite (borrador o enviada), sin decisión del cliente a la fecha.</p>
+
+              <p className="mb-1 text-sm font-semibold">4. Cartera y cuentas por pagar al cierre del mes</p>
+              <div className="mb-2 grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-4">
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Cartera total</p><p className="font-semibold text-slate-900">{fmt(informeGerencial.cartera.total)}</p></div>
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Cartera vencida</p><p className="font-semibold text-rose-700">{fmt(informeGerencial.cartera.vencida)}</p></div>
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">CxP total</p><p className="font-semibold text-slate-900">{fmt(informeGerencial.cxp.total)}</p></div>
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">CxP vencida</p><p className="font-semibold text-rose-700">{fmt(informeGerencial.cxp.vencida)}</p></div>
+              </div>
+              <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <p className="mb-1 text-[11px] font-semibold uppercase text-slate-400">Top clientes por saldo</p>
+                  {informeGerencial.cartera.porTercero.length === 0 && <p className="text-[11px] text-slate-400">Sin cartera pendiente.</p>}
+                  {informeGerencial.cartera.porTercero.slice(0, 5).map((g) => (
+                    <div key={g.nombre} className="flex justify-between border-b border-slate-100 py-1 text-[11px]"><span>{g.nombre}</span><span className="font-medium">{fmt(g.total)}</span></div>
+                  ))}
+                </div>
+                <div>
+                  <p className="mb-1 text-[11px] font-semibold uppercase text-slate-400">Top proveedores por saldo</p>
+                  {informeGerencial.cxp.porTercero.length === 0 && <p className="text-[11px] text-slate-400">Sin cuentas por pagar.</p>}
+                  {informeGerencial.cxp.porTercero.slice(0, 5).map((g) => (
+                    <div key={g.nombre} className="flex justify-between border-b border-slate-100 py-1 text-[11px]"><span>{g.nombre}</span><span className="font-medium">{fmt(g.total)}</span></div>
+                  ))}
+                </div>
+              </div>
+
+              <p className="mb-1 text-sm font-semibold">5. Nómina del mes</p>
+              <div className="mb-4 grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-3">
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Total nómina pagada</p><p className="font-semibold text-slate-900">{fmt(informeGerencial.totalNomina)}</p></div>
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Colaboradores pagados</p><p className="font-semibold text-slate-900">{informeGerencial.colaboradoresPagados}</p></div>
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Prestaciones por provisionar</p><p className="font-semibold text-slate-900">{fmt(provisionPrestaciones.total)}</p></div>
+              </div>
+
+              <p className="mb-1 text-sm font-semibold">6. Proyectos (estado acumulado a la fecha)</p>
+              <div className="mb-1 space-y-1">
+                {informeGerencial.proyectosActivos.length === 0 && <p className="text-[11px] text-slate-400">Sin proyectos activos.</p>}
+                {informeGerencial.proyectosActivos.map((p) => (
+                  <div key={p.id} className="flex items-center justify-between border-b border-slate-100 py-1 text-[11px]">
+                    <span>{p.nombre} <span className="text-slate-400">({p.avancePct.toFixed(0)}% ejecutado)</span></span>
+                    <span className={`font-medium ${p.margen >= 0 ? "text-emerald-700" : "text-rose-600"}`}>{fmt(p.margen)}</span>
+                  </div>
+                ))}
+              </div>
+              {informeGerencial.proyectosNegativos.length > 0 ? (
+                <p className="mb-4 mt-1.5 rounded-lg bg-rose-50 px-2 py-1.5 text-[11px] text-rose-700">⚠ {informeGerencial.proyectosNegativos.length} proyecto(s) con margen negativo a la fecha — revisar costos antes de seguir ejecutando.</p>
+              ) : (
+                <div className="mb-4" />
+              )}
+
+              <p className="mb-1 text-sm font-semibold">7. Indicadores clave (últimos 90 días, a la fecha de generación)</p>
+              <div className="mb-2 grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-4">
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Liquidez</p><p className="font-semibold text-slate-900">{indicadores.indiceLiquidez.toFixed(2)}</p></div>
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">DSO / DPO</p><p className="font-semibold text-slate-900">{indicadores.dso.toFixed(0)}d / {indicadores.dpo.toFixed(0)}d</p></div>
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Margen neto</p><p className={`font-semibold ${indicadores.margenNetoPct >= 0 ? "text-emerald-700" : "text-rose-700"}`}>{indicadores.margenNetoPct.toFixed(1)}%</p></div>
+                <div className="rounded-lg bg-slate-50 p-2"><p className="text-[11px] text-slate-400">Ciclo de caja</p><p className="font-semibold text-slate-900">{indicadores.cicloCaja.toFixed(0)} d</p></div>
+              </div>
+
+              {/* Glosario en lenguaje sencillo — para que quien no maneja
+                  finanzas entienda QUÉ mide cada indicador, no solo el
+                  número. Va siempre, sin importar el valor. */}
+              <div className="mb-2 space-y-1 rounded-lg bg-slate-50 p-2.5 text-[11px] text-slate-600">
+                <p><span className="font-semibold text-slate-700">Índice de liquidez</span> — por cada peso que la empresa debe pagar pronto, cuánto tiene disponible entre caja y lo que le deben los clientes. 1.0 o más es sano; menos de 1.0 significa que hoy no alcanzaría sin recurrir a más cartera o crédito.</p>
+                <p><span className="font-semibold text-slate-700">DSO (días de cartera)</span> — en promedio, cuántos días tarda un cliente en pagar una factura desde que se emite. Entre más bajo, más rápido entra el efectivo a la empresa.</p>
+                <p><span className="font-semibold text-slate-700">DPO (días de pago)</span> — en promedio, cuántos días tarda la empresa en pagarle a sus proveedores. Un DPO más alto que el DSO ayuda a la caja, porque se paga después de haber cobrado.</p>
+                <p><span className="font-semibold text-slate-700">Ciclo de caja (DSO − DPO)</span> — cuántos días, en promedio, la empresa tiene que financiar con caja propia el tiempo entre pagarle a proveedores y cobrarle a clientes. Lo ideal es que sea bajo o negativo.</p>
+                <p><span className="font-semibold text-slate-700">Margen neto</span> — de cada $100 vendidos, cuántos quedan limpios después de pagar compras, gastos, nómina e intereses. Es la rentabilidad real del negocio, no solo lo facturado.</p>
+              </div>
+
+              {/* Lectura combinada con los valores REALES del mes — no es
+                  un texto fijo, cambia según el desempeño real, para que la
+                  conclusión (no solo el dato) le quede clara a la gerencia. */}
+              <p className="mb-4 rounded-lg bg-slate-50 p-2.5 text-[11px] text-slate-600">
+                <span className="font-semibold text-slate-700">Lectura para la gerencia:</span>{" "}
+                {indicadores.indiceLiquidez >= 1.5
+                  ? `hoy, por cada peso que la empresa debe a corto plazo, tiene ${indicadores.indiceLiquidez.toFixed(2)} disponibles entre caja y cartera — una posición cómoda.`
+                  : indicadores.indiceLiquidez >= 1
+                  ? `hoy, por cada peso que la empresa debe a corto plazo, tiene ${indicadores.indiceLiquidez.toFixed(2)} disponibles — alcanza, pero con poco margen; conviene vigilarlo.`
+                  : `hoy, por cada peso que la empresa debe a corto plazo, solo tiene ${indicadores.indiceLiquidez.toFixed(2)} disponibles — no alcanzaría para cubrir las obligaciones inmediatas sin recurrir a más cartera o crédito.`}{" "}
+                {indicadores.cicloCaja > 0
+                  ? `Además, en promedio se le paga a los proveedores ${indicadores.cicloCaja.toFixed(0)} día(s) antes de que los clientes paguen — ese hueco se está financiando con caja propia o crédito.`
+                  : `Y se le cobra a los clientes antes de tener que pagarle a los proveedores, lo que alivia la necesidad de capital de trabajo.`}{" "}
+                {indicadores.margenNetoPct < 0
+                  ? `En rentabilidad, de cada $100 vendidos en los últimos 90 días se terminó perdiendo ${Math.abs(indicadores.margenNetoPct).toFixed(1)} pesos después de cubrir todos los costos — la operación hoy no se está pagando sola.`
+                  : indicadores.margenNetoPct < 10
+                  ? `En rentabilidad, de cada $100 vendidos quedan ${indicadores.margenNetoPct.toFixed(1)} pesos limpios después de todos los costos — un margen ajustado, con poco colchón para imprevistos.`
+                  : `En rentabilidad, de cada $100 vendidos quedan ${indicadores.margenNetoPct.toFixed(1)} pesos limpios después de todos los costos — una operación saludable.`}
+              </p>
+
+              {mesInformeGerencial === hoy().slice(0, 7) && ((pendientesPorAsignarMes && pendientesPorAsignarMes.items.length > 0) || (cotizacionesSinFacturar && cotizacionesSinFacturar.items.length > 0)) && (
+                <>
+                  <p className="mb-1 text-sm font-semibold">8. Alertas de gestión (a la fecha de generación)</p>
+                  {pendientesPorAsignarMes && pendientesPorAsignarMes.items.length > 0 && (
+                    <p className="mb-1.5 rounded-lg bg-amber-50 px-2 py-1.5 text-[11px] text-amber-700">⚠ {pendientesPorAsignarMes.items.length} costo(s) de este mes ({fmt(pendientesPorAsignarMes.total)}) sin asignar a proyecto u orden.</p>
+                  )}
+                  {cotizacionesSinFacturar && cotizacionesSinFacturar.items.length > 0 && (
+                    <p className="mb-1.5 rounded-lg bg-rose-50 px-2 py-1.5 text-[11px] text-rose-700">⚠ {cotizacionesSinFacturar.items.length} cotización(es) ganada(s) sin facturar por completo ({fmt(cotizacionesSinFacturar.total)} pendiente).</p>
+                  )}
+                </>
+              )}
             </div>
           </div>
         </div>

@@ -159,6 +159,14 @@ export async function subirPdfInforme(instance, account, nombre, blob) {
   return subirArchivoOneDrive(token, `${CARPETA_PDFS_INFORMES}/${nombreArchivo}`, blob, "application/pdf");
 }
 
+/** Igual que subirPdfInforme, pero para el Excel de un informe (ej. estado de cuenta acumulado de CxC/CxP) — un archivo con la fecha del día, en la misma carpeta de Informes. */
+export async function subirExcelInforme(instance, account, nombre, blob) {
+  const token = await obtenerTokenGraph(instance, account);
+  const fechaHoy = new Date().toISOString().slice(0, 10);
+  const nombreArchivo = `${nombre}_${fechaHoy}.xlsx`.replace(/[\\/:*?"<>|]/g, "-");
+  return subirArchivoOneDrive(token, `${CARPETA_PDFS_INFORMES}/${nombreArchivo}`, blob, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+}
+
 /**
  * Consigue un token de acceso para Graph — intenta en silencio primero
  * (sin interrumpir al usuario); si la sesión de Microsoft expiró o hace
