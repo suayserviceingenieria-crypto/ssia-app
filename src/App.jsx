@@ -1,7 +1,12 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
+import { generarPdfDesdeElemento } from "./services/pdfGenerator";
+import { useMsal, useIsAuthenticated } from "@azure/msal-react";
+import { useColeccionSupabase, useConfiguracion } from "./supabase/useColeccionSupabase";
 import { ROLES, USUARIOS_SEMILLA, hashClave, guardarSesion, leerSesion, cerrarSesion, obtenerRol } from "./utils/auth";
 import Login from "./components/Login";
-import ConexionMicrosoft from "./components/ConexionMicrosoft";
+import ConexionMicrosoft, { AlertaConexionMicrosoft } from "./components/ConexionMicrosoft";
+import * as GraphSync from "./services/graphExcelService";
+import { generarLibroNominaMensual } from "./services/nominaMensualTemplate";
 
 // Logo oficial de la empresa, incrustado en base64 para que se vea igual en
 // la vista previa y en GitHub, sin depender de una carpeta de assets aparte.
@@ -11,7 +16,7 @@ import * as XLSX from "xlsx";
 import {
   ClipboardList, FileText, Briefcase, PiggyBank, Factory, LayoutDashboard,
   Plus, X, TrendingUp, TrendingDown, Wallet, ShoppingCart, Receipt, Percent, Users, Package,
-  Calendar, Settings2, AlertTriangle, CheckCircle2, FileDown, Mail, Eye, ArrowRight, Gauge, Award
+  Calendar, Settings2, AlertTriangle, CheckCircle2, FileDown, Mail, Eye, ArrowRight, Gauge, Award, ChevronDown, Phone, Pencil, Trash2, Copy, UploadCloud
 } from "lucide-react";
 
 const fmt = (n) => new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(n || 0);
@@ -78,9 +83,32 @@ const CONCEPTOS_RETEICA = [
   { id: "CONSTRUCCION", label: "Construcción (11.04 x mil)", tarifa: 0.01104 },
 ];
 
-const CALENDARIO_FIJO = [
-  { impuesto: "Retención en la fuente (julio 2026)", ambito: "NACIONAL", periodicidad: "Mensual", dependeNit: true, ventanaInicio: "2026-08-12", verificado: true, nota: "Ventana 12-26 de agosto confirmada por la DIAN" },
-  { impuesto: "ICA Bogotá bimestre may-jun 2026", ambito: "DISTRITAL", periodicidad: "Bimestral", dependeNit: false, fecha: "2026-08-21", verificado: true, nota: "Fecha única, no depende del NIT" },
+// Fechas de vencimiento de Retención en la fuente 2026 por mes de vencimiento
+// (declara el mes anterior) y último dígito del NIT — posición 1-9 = dígitos 1-9,
+// posición 10 = dígito 0 — según el calendario tributario DIAN 2026.
+const RETEFUENTE_DIAS_2026 = {
+  1: [10, 11, 12, 13, 16, 17, 18, 19, 20, 23],
+  2: [10, 11, 12, 13, 16, 17, 18, 19, 20, 24],
+  3: [13, 14, 15, 16, 17, 20, 21, 22, 23, 24],
+  4: [12, 13, 14, 15, 19, 20, 21, 22, 25, 26],
+  5: [10, 11, 12, 16, 17, 18, 19, 22, 23, 24],
+  6: [9, 10, 13, 14, 15, 16, 17, 21, 22, 23],
+  7: [12, 13, 14, 18, 19, 20, 21, 24, 25, 26],
+  8: [9, 10, 11, 14, 15, 16, 17, 18, 21, 22],
+  9: [9, 13, 14, 15, 16, 19, 20, 21, 22, 23],
+  10: [11, 12, 13, 17, 18, 19, 20, 23, 24, 25],
+  11: [10, 11, 14, 15, 16, 17, 18, 21, 22, 23],
+  12: [13, 14, 15, 18, 19, 20, 21, 22, 25, 26],
+};
+// Fechas de declaración y pago de ICA Bogotá 2026 por bimestre — Resolución
+// SDH-000195 de 2025 (Secretaría Distrital de Hacienda).
+const ICA_BOGOTA_2026 = [
+  { periodo: "Ene-Feb", fecha: "2026-04-10" },
+  { periodo: "Mar-Abr", fecha: "2026-06-12" },
+  { periodo: "May-Jun", fecha: "2026-08-21" },
+  { periodo: "Jul-Ago", fecha: "2026-10-09" },
+  { periodo: "Sep-Oct", fecha: "2026-12-11" },
+  { periodo: "Nov-Dic", fecha: "2027-02-12" },
 ];
 const VENTANAS_IVA = {
   BIMESTRAL: [
@@ -140,6 +168,44 @@ function ventanaIvaVigente(periodicidad) {
   const limite = new Date(hoy()).getTime() - 20 * 86400000;
   return ventanas.find((v) => new Date(v.ventanaInicio).getTime() >= limite) || ventanas[ventanas.length - 1];
 }
+function fechaRetefuente(mes, posicion) {
+  const dias = RETEFUENTE_DIAS_2026[mes];
+  if (!dias || !posicion) return null;
+  const dia = dias[posicion - 1];
+  return `2026-${String(mes).padStart(2, "0")}-${String(dia).padStart(2, "0")}`;
+}
+function retencionVigente(posicion) {
+  const limite = new Date(hoy()).getTime() - 20 * 86400000;
+  for (let mes = 1; mes <= 12; mes++) {
+    const fecha = fechaRetefuente(mes, posicion);
+    if (fecha && new Date(fecha).getTime() >= limite) return { mes, fecha };
+  }
+  return { mes: 12, fecha: fechaRetefuente(12, posicion) }; // último vencimiento verificado de 2026 — actualizar tabla cuando DIAN publique el calendario 2027
+}
+function icaVigente() {
+  const limite = new Date(hoy()).getTime() - 20 * 86400000;
+  return ICA_BOGOTA_2026.find((v) => new Date(v.fecha).getTime() >= limite) || ICA_BOGOTA_2026[ICA_BOGOTA_2026.length - 1];
+}
+function ultimosDosDigitosDeNit(nit) {
+  const soloNumeros = (nit || "").split("-")[0].replace(/\D/g, "");
+  if (!soloNumeros) return null;
+  return parseInt(soloNumeros.slice(-2).padStart(2, "0"), 10);
+}
+// Plazo de pago de seguridad social (PILA) según los 2 últimos dígitos del NIT
+// — Decreto 780 de 2016, art. 3.2.2.1 (pago mes vencido, día hábil N contado
+// desde el día 1 del mes siguiente al periodo de la nómina).
+const BANDAS_SEGURIDAD_SOCIAL = [
+  { hasta: 7, dia: 2 }, { hasta: 14, dia: 3 }, { hasta: 21, dia: 4 }, { hasta: 28, dia: 5 },
+  { hasta: 35, dia: 6 }, { hasta: 42, dia: 7 }, { hasta: 49, dia: 8 }, { hasta: 56, dia: 9 },
+  { hasta: 63, dia: 10 }, { hasta: 69, dia: 11 }, { hasta: 75, dia: 12 }, { hasta: 81, dia: 13 },
+  { hasta: 87, dia: 14 }, { hasta: 93, dia: 15 }, { hasta: 99, dia: 16 },
+];
+function bandaDigitosSeguridadSocial(dosDigitos) {
+  if (dosDigitos === null || dosDigitos === undefined || isNaN(dosDigitos)) return null;
+  const banda = BANDAS_SEGURIDAD_SOCIAL.find((b) => dosDigitos <= b.hasta);
+  return banda ? banda.dia : null;
+}
+const NOMBRES_MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
 
 const CLIENTES_SEMILLA = [];
 const PROVEEDORES_SEMILLA = [];
@@ -227,6 +293,10 @@ const CONDICIONES_PAGO_FRECUENTES = [
   "Crédito a 60 días fecha de factura",
 ];
 const UNIDADES_MEDIDA_COTIZACION = ["UND", "M (metro lineal)", "M2 (metro cuadrado)", "M3 (metro cúbico)", "KG", "GLB (global)", "HORA", "DÍA", "SERVICIO", "JUEGO", "PAR"];
+// Tipos de tarea de seguimiento comercial (llamar, enviar correo, etc.) —
+// vive en la tabla tareas_comerciales, un "calendario propio" del área
+// Comercial, separado del módulo Calendario general (que ese rol no ve).
+const TIPOS_TAREA_COMERCIAL = ["Llamar", "Enviar correo", "Visitar", "Reunión", "Otro"];
 const CLASES_RIESGO_ARL = [
   { clase: "I", nombre: "Riesgo mínimo", tarifa: 0.00522, ejemplos: "Trabajo de oficina, administrativo, consultoría" },
   { clase: "II", nombre: "Riesgo bajo", tarifa: 0.01044, ejemplos: "Comercio, algunas labores manuales de bajo riesgo" },
@@ -391,10 +461,9 @@ const TIPOS_HORA_EXTRA = [
 
 const NAV = [
   { id: "registro", label: "Registro", icon: ClipboardList },
-  { id: "terceros", label: "Terceros", icon: Users },
-  { id: "cotizaciones", label: "Cotizaciones", icon: FileText },
+  { id: "comercial", label: "Comercial", icon: TrendingUp },
   { id: "proyectos", label: "Proyectos", icon: Briefcase },
-  { id: "cxc", label: "Cuentas x cobrar", icon: TrendingUp },
+  { id: "cxc", label: "Cuentas x cobrar", icon: Receipt },
   { id: "cxp", label: "Cuentas x pagar", icon: ShoppingCart },
   { id: "presupuesto", label: "Presupuesto", icon: PiggyBank },
   { id: "prestaciones", label: "Nómina y prestaciones", icon: Award },
@@ -415,89 +484,301 @@ const NAV = [
 // el esquema de hashing SHA-256 + sal y las credenciales iniciales de prueba.
 // El componente de login vive en src/components/Login.jsx.
 
+// ============================================================================
+// PERSISTENCIA LOCAL — sin esto, la app olvidaba todo al refrescar la
+// página, porque React solo guarda el estado en memoria mientras la pestaña
+// sigue abierta. Este hook funciona igual que useState, pero además lee de
+// localStorage al montar y guarda ahí cada vez que el valor cambia — así la
+// información sobrevive a un refresco, cerrar la pestaña, o reiniciar el
+// navegador (mientras sea el mismo navegador en el mismo computador).
+// No reemplaza tener un backend real (eso seguiría siendo válido para
+// varios dispositivos/usuarios a la vez) — es la protección mínima para no
+// perder trabajo por accidente mientras tanto.
+function usePersistido(clave, valorInicial) {
+  const [valor, setValor] = useState(() => {
+    try {
+      const guardado = localStorage.getItem(clave);
+      return guardado !== null ? JSON.parse(guardado) : valorInicial;
+    } catch (error) {
+      console.error(`No se pudo leer "${clave}" de localStorage:`, error);
+      return valorInicial;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(clave, JSON.stringify(valor));
+    } catch (error) {
+      console.error(`No se pudo guardar "${clave}" en localStorage:`, error);
+    }
+  }, [clave, valor]);
+  return [valor, setValor];
+}
+
 export default function AppCompleta() {
   const [vista, setVista] = useState("dashboard");
-  const [usuarios, setUsuarios] = useState(USUARIOS_SEMILLA);
+  const {
+    registros: usuarios,
+    crear: crearUsuarioEnBD,
+    actualizar: actualizarUsuarioEnBD,
+    eliminar: eliminarUsuarioEnBD,
+  } = useColeccionSupabase("usuarios", {
+    desdeFila: (fila) => ({ id: fila.id, usuario: fila.usuario, nombreCompleto: fila.nombre_completo, rolId: fila.rol_id, passwordHash: fila.password_hash }),
+    haciaFila: (r) => ({ id: r.id, usuario: r.usuario, nombre_completo: r.nombreCompleto, rol_id: r.rolId, password_hash: r.passwordHash }),
+  });
   const [sesion, setSesion] = useState(() => leerSesion()); // lee sessionStorage una sola vez al montar; null = sin sesión activa
+  const { instance: msalInstance, accounts: cuentasMsal } = useMsal();
+  const conectadoAMicrosoft = useIsAuthenticated();
+
+  // Aviso visible cuando una sincronización con OneDrive/Excel falla — antes
+  // el error solo quedaba en la consola del navegador (invisible para quien
+  // usa la app), así que una cotización podía quedar sin sincronizar sin que
+  // nadie se enterara. null = sin aviso pendiente.
+  const [errorSyncOneDrive, setErrorSyncOneDrive] = useState(null);
+
+  // Traduce el error técnico de Graph a un mensaje que explique qué hacer —
+  // el caso más común en la práctica es el archivo bloqueado porque alguien
+  // lo tiene abierto en Excel (de escritorio o en el navegador).
+  function mensajeErrorSyncOneDrive(error) {
+    const texto = String(error?.message || error || "");
+    if (/423|locked|resourceLocked/i.test(texto)) {
+      return "El archivo de Excel está abierto por otra persona (en Excel de escritorio o en el navegador) y no se pudo actualizar. Pídele que lo cierre por completo e inténtalo de nuevo.";
+    }
+    if (/401|403|InteractionRequired|access.?token/i.test(texto)) {
+      return "No se pudo sincronizar por un problema de permisos/sesión con Microsoft 365 — intenta desconectar y volver a conectar Microsoft.";
+    }
+    if (/409|resourceModified|eTag/i.test(texto)) {
+      return "El archivo cambió al mismo tiempo que se intentaba actualizar — vuelve a intentarlo en unos segundos.";
+    }
+    return `No se pudo sincronizar con OneDrive: ${texto || "error desconocido"}.`;
+  }
+
+  // Envoltura genérica: intenta sincronizar con OneDrive en segundo plano,
+  // sin nunca bloquear ni romper la app si Microsoft no está conectado o si
+  // la llamada falla (sin internet, permiso revocado, archivo movido, etc.).
+  // El registro local en React siempre es lo que manda — OneDrive es un
+  // espejo, no la fuente de verdad. El error, cuando lo hay, además de
+  // quedar en consola, se muestra en pantalla (ver errorSyncOneDrive) para
+  // que no pase desapercibido como pasaba antes.
+  function sincronizarConGraph(fnSync, ...args) {
+    if (!conectadoAMicrosoft || !cuentasMsal[0]) return;
+    // Nota: a propósito NO se limpia errorSyncOneDrive cuando una
+    // sincronización distinta sí funciona — esta función se comparte entre
+    // cotizaciones, registros, nómina, terceros, etc., y un envío exitoso de
+    // un tipo no significa que el problema original (ej. Excel de
+    // Cotizaciones bloqueado) ya se resolvió. El aviso se descarta a mano
+    // con el botón de cerrar, o vuelve a aparecer si hay un nuevo error.
+    return fnSync(msalInstance, cuentasMsal[0], ...args).catch((error) => {
+      console.error("[OneDrive] No se pudo sincronizar:", error);
+      setErrorSyncOneDrive(mensajeErrorSyncOneDrive(error));
+    });
+  }
   const usuarioActual = sesion ? usuarios.find((u) => u.id === sesion.id) || null : null;
   const rolActual = sesion ? obtenerRol(sesion.rolId) : null;
+
+  // Misma regla que ya protege los botones del menú lateral — aplicada
+  // también directamente sobre el contenido, para que nunca se renderice
+  // una pantalla que el rol no debería ver, ni siquiera un instante,
+  // independientemente de en qué haya quedado el estado "vista".
+  function puedeVer(id) {
+    if (!rolActual) return false;
+    return !rolActual.modulos || rolActual.modulos.includes(id);
+  }
+
+  // Seguridad: corrige la vista según lo que el rol puede ver, cada vez que
+  // hay una sesión activa — no solo cuando la persona escribe su clave. Esto
+  // es necesario porque conectar/desconectar Microsoft 365 recarga la
+  // página entera (loginRedirect/logoutRedirect); al volver a cargar, la
+  // sesión diaria se restaura sola desde el navegador (sin pasar por el
+  // formulario de login), así que la única corrección que vivía ahí nunca
+  // se ejecutaba — dejando ver, aunque fuera un instante, una pantalla que
+  // el rol no debería poder ver.
+  useEffect(() => {
+    if (rolActual?.modulos && !rolActual.modulos.includes(vista)) {
+      setVista(rolActual.modulos[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sesion]);
   const [tipoRegistroInicial, setTipoRegistroInicial] = useState("VENTA");
 
   function irARegistrarNomina() {
     setTipoRegistroInicial("NOMINA");
     setVista("registro");
   }
-  const [clientes, setClientes] = useState(CLIENTES_SEMILLA);
-  const [proveedores, setProveedores] = useState(PROVEEDORES_SEMILLA);
-  const [colaboradores, setColaboradores] = useState(COLABORADORES_SEMILLA);
-  const [liquidaciones, setLiquidaciones] = useState([]);
+  const {
+    registros: clientes,
+    crear: crearClienteEnBD,
+    actualizar: actualizarClienteEnBD,
+    eliminar: eliminarClienteEnBD,
+  } = useColeccionSupabase("clientes", {
+    desdeFila: (fila) => fila,
+    haciaFila: (r) => ({ id: r.id, nombre: r.nombre, nit: r.nit || "", direccion: r.direccion || "", telefono: r.telefono || "" }),
+  });
+  const {
+    registros: proveedores,
+    crear: crearProveedorEnBD,
+    actualizar: actualizarProveedorEnBD,
+    eliminar: eliminarProveedorEnBD,
+  } = useColeccionSupabase("proveedores", {
+    desdeFila: (fila) => fila,
+    haciaFila: (r) => ({ id: r.id, nombre: r.nombre, nit: r.nit || "", direccion: r.direccion || "", telefono: r.telefono || "" }),
+  });
+  const {
+    registros: liquidaciones,
+    crear: crearLiquidacionEnBD,
+    actualizar: actualizarLiquidacionEnBD,
+    eliminar: eliminarLiquidacionEnBD,
+  } = useColeccionSupabase("liquidaciones", {
+    desdeFila: (fila) => ({ ...fila.datos, id: fila.id, tipo: fila.tipo }),
+    haciaFila: (r) => { const { id, tipo, ...resto } = r; return { id, tipo, datos: resto }; },
+  });
 
   function registrarLiquidacion(liq) {
     const conId = { ...liq, id: liq.id || `liq_${Date.now()}_${Math.random().toString(36).slice(2, 8)}` };
-    setLiquidaciones((ls) => [conId, ...ls]);
+    crearLiquidacionEnBD(conId);
     if (liq.pagarAhora && liq.cuentaId) {
       registrarOperacion({
         tipo: "PAGO", fecha: liq.fechaCorte,
-        concepto: `Liquidación ${liq.tipo === "VACACIONES" ? "vacaciones" : "prestaciones sociales"} - ${liq.colaboradorNombre}`,
+        concepto: `Liquidación ${{ CESANTIAS: "cesantías", PRIMA: "prima", VACACIONES: "vacaciones", LIQUIDACION_FINAL: "de contrato" }[liq.tipo] || "prestaciones sociales"} - ${liq.colaboradorNombre}`,
         valor: liq.valorPagado, iva: 0, cuentaId: liq.cuentaId,
         colaboradorId: liq.colaboradorId, categoriaCosto: "MANO_OBRA",
+        liquidacionId: conId.id, // conecta el pago con su liquidación, para poder borrarlo si se elimina la liquidación
       });
     }
   }
 
   function actualizarLiquidacion(id, liq) {
-    setLiquidaciones((ls) => ls.map((l) => (l.id === id ? { ...liq, id } : l)));
+    actualizarLiquidacionEnBD(id, liq);
   }
 
-  function eliminarLiquidacion(id) {
-    setLiquidaciones((ls) => ls.filter((l) => l.id !== id));
+  function eliminarLiquidacion(id, tambienPagoVinculado) {
+    if (tambienPagoVinculado) {
+      const pagoVinculado = operaciones.find((o) => o.liquidacionId === id);
+      if (pagoVinculado) eliminarOperacion(pagoVinculado.id);
+    }
+    eliminarLiquidacionEnBD(id);
   }
+
+  const {
+    registros: colaboradores,
+    crear: crearColaboradorEnBD,
+    actualizar: actualizarColaboradorEnBD,
+    eliminar: eliminarColaboradorEnBD,
+  } = useColeccionSupabase("colaboradores");
 
   function crearColaborador(datos) {
     const nuevo = { id: `e${Date.now()}`, ...datos };
-    setColaboradores((cs) => [...cs, nuevo]);
+    crearColaboradorEnBD(nuevo);
     return nuevo.id;
   }
-
   function actualizarColaborador(id, cambios) {
-    setColaboradores((cs) => cs.map((c) => (c.id === id ? { ...c, ...cambios } : c)));
+    actualizarColaboradorEnBD(id, cambios);
+  }
+  function eliminarColaborador(id) {
+    eliminarColaboradorEnBD(id);
   }
 
-  const [pasivosFinancieros, setPasivosFinancieros] = useState([]);
+  const {
+    registros: pasivosFinancieros,
+    crear: crearPasivoFinancieroEnBD,
+    actualizar: actualizarPasivoFinancieroEnBD,
+  } = useColeccionSupabase("pasivos_financieros");
 
-  const [materiasPrimas, setMateriasPrimas] = useState([]);
-  const [productosTerminados, setProductosTerminados] = useState([]);
-  const [listaMateriales, setListaMateriales] = useState([]);
-  const [ordenesProduccion, setOrdenesProduccion] = useState([]);
+  const {
+    registros: materiasPrimas,
+    crear: crearMateriaPrimaEnBD,
+    actualizar: actualizarMateriaPrimaEnBD,
+    eliminar: eliminarMateriaPrimaEnBD,
+  } = useColeccionSupabase("materias_primas");
+  const {
+    registros: productosTerminados,
+    crear: crearProductoTerminadoEnBD,
+    eliminar: eliminarProductoTerminadoEnBD,
+  } = useColeccionSupabase("productos_terminados");
+  const {
+    registros: listaMaterialesCruda,
+    crear: crearLineaListaMaterialesEnBD,
+  } = useColeccionSupabase("lista_materiales", {
+    desdeFila: (fila) => ({ id: fila.id, productoTerminadoId: fila.producto_terminado_id, materiaPrimaId: fila.materia_prima_id, cantidadPorUnidad: fila.cantidad_por_unidad }),
+    haciaFila: (r) => ({ producto_terminado_id: r.productoTerminadoId, materia_prima_id: r.materiaPrimaId, cantidad_por_unidad: r.cantidadPorUnidad }),
+  });
+  const listaMateriales = listaMaterialesCruda; // alias, mismo nombre que usa el resto del código
+  const {
+    registros: ordenesProduccion,
+    crear: crearOrdenProduccionEnBD,
+    actualizar: actualizarOrdenProduccionEnBD,
+  } = useColeccionSupabase("ordenes_produccion");
 
+  // Supabase es ahora la fuente de verdad — crearClienteEnBD/etc. escriben
+  // directo en la base de datos compartida, y useColeccionSupabase (arriba)
+  // actualiza "clientes"/"proveedores" solo cuando la base de datos
+  // confirma el cambio (para este dispositivo Y para cualquier otro
+  // conectado al mismo tiempo, vía la suscripción en tiempo real).
+  // OneDrive sigue recibiendo una copia — ya no es de dónde la app lee,
+  // solo un respaldo/reporte en Excel para consulta o contabilidad.
   function crearCliente(datos) {
     const campos = typeof datos === "string" ? { nombre: datos } : datos;
     const nuevo = { id: `c${Date.now()}`, nit: "", direccion: "", telefono: "", ...campos };
-    setClientes((cs) => [...cs, nuevo]);
+    crearClienteEnBD(nuevo);
+    sincronizarConGraph(GraphSync.sincronizarTercerosCompleto, [...clientes, nuevo], proveedores);
     return nuevo.id;
   }
   function crearProveedor(datos) {
     const campos = typeof datos === "string" ? { nombre: datos } : datos;
     const nuevo = { id: `p${Date.now()}`, nit: "", direccion: "", telefono: "", ...campos };
-    setProveedores((ps) => [...ps, nuevo]);
+    crearProveedorEnBD(nuevo);
+    sincronizarConGraph(GraphSync.sincronizarTercerosCompleto, clientes, [...proveedores, nuevo]);
     return nuevo.id;
   }
   function actualizarCliente(id, cambios) {
-    setClientes((cs) => cs.map((c) => (c.id === id ? { ...c, ...cambios } : c)));
+    actualizarClienteEnBD(id, cambios);
+    sincronizarConGraph(GraphSync.sincronizarTercerosCompleto, clientes.map((c) => (c.id === id ? { ...c, ...cambios } : c)), proveedores);
   }
   function actualizarProveedor(id, cambios) {
-    setProveedores((ps) => ps.map((p) => (p.id === id ? { ...p, ...cambios } : p)));
+    actualizarProveedorEnBD(id, cambios);
+    sincronizarConGraph(GraphSync.sincronizarTercerosCompleto, clientes, proveedores.map((p) => (p.id === id ? { ...p, ...cambios } : p)));
+  }
+  function eliminarCliente(id) {
+    eliminarClienteEnBD(id);
+    sincronizarConGraph(GraphSync.sincronizarTercerosCompleto, clientes.filter((c) => c.id !== id), proveedores);
+  }
+  function eliminarProveedor(id) {
+    eliminarProveedorEnBD(id);
+    sincronizarConGraph(GraphSync.sincronizarTercerosCompleto, clientes, proveedores.filter((p) => p.id !== id));
   }
 
-  const [operaciones, setOperaciones] = useState([]);
+  const {
+    registros: operaciones,
+    crear: crearOperacionEnBD,
+    actualizar: actualizarOperacionEnBD,
+    eliminar: eliminarOperacionEnBD,
+  } = useColeccionSupabase("operaciones", {
+    desdeFila: (fila) => ({ ...fila.datos, id: fila.id, tipo: fila.tipo }),
+    haciaFila: (r) => { const { id, tipo, ...resto } = r; return { id, tipo, datos: resto }; },
+  });
 
-  const [cotizaciones, setCotizaciones] = useState([]);
+  const {
+    registros: cotizaciones,
+    crear: crearCotizacionEnBD,
+    actualizar: actualizarCotizacionEnBD,
+    eliminar: eliminarCotizacionEnBD,
+  } = useColeccionSupabase("cotizaciones");
 
-  const [proyectos, setProyectos] = useState([]);
+  const {
+    registros: proyectos,
+    crear: crearProyectoEnBD,
+    actualizar: actualizarProyectoEnBD,
+    eliminar: eliminarProyectoEnBD,
+  } = useColeccionSupabase("proyectos");
 
-  const [costosPresupuesto, setCostosPresupuesto] = useState([]);
+  const {
+    registros: costosPresupuesto,
+    crear: crearCostoEnBD,
+    actualizar: actualizarCostoEnBD,
+    eliminar: eliminarCostoEnBD,
+  } = useColeccionSupabase("costos_presupuesto");
 
-  const [nit, setNit] = useState("");
+  const [nit, setNit] = useConfiguracion("nit");
+  const [metaVentas, setMetaVentas] = useConfiguracion("meta_mensual_ventas");
   const [ivaPeriodicidad, setIvaPeriodicidad] = useState("CUATRIMESTRAL");
   const [smmlv, setSmmlv] = useState(SMMLV_2026);
   const [auxilioTransporteLey, setAuxilioTransporteLey] = useState(AUXILIO_TRANSPORTE_LEY_2026);
@@ -511,6 +792,7 @@ export default function AppCompleta() {
   const [pctGastosProduccion, setPctGastosProduccion] = useState(20);
   const [umbralAlerta, setUmbralAlerta] = useState(7);
   const ultimoDigito = ultimoDigitoDeNit(nit);
+  const ultimosDosDigitosNit = ultimosDosDigitosDeNit(nit);
 
   const calendarioPersonalizado = useMemo(() => {
     const ventanaIva = ventanaIvaVigente(ivaPeriodicidad);
@@ -519,12 +801,37 @@ export default function AppCompleta() {
       ambito: "NACIONAL", periodicidad: ivaPeriodicidad === "CUATRIMESTRAL" ? "Cuatrimestral" : "Bimestral",
       dependeNit: true, ventanaInicio: ventanaIva.ventanaInicio, verificado: true, nota: "Ventana según periodicidad configurada",
     };
-    return [...CALENDARIO_FIJO, filaIva].map((c) => {
-      const fechaCalculada = c.dependeNit ? fechaHabilN(c.ventanaInicio, posicionDigito(ultimoDigito)) : c.fecha;
+    const inicioMesActual = `${hoy().slice(0, 7)}-01`;
+    const fechaMesAnterior = new Date(inicioMesActual + "T00:00:00");
+    fechaMesAnterior.setDate(0); // retrocede al último día del mes anterior
+    const filaSeguridadSocial = {
+      impuesto: `Seguridad social (PILA) — nómina de ${NOMBRES_MESES[fechaMesAnterior.getMonth()]} ${fechaMesAnterior.getFullYear()}`,
+      ambito: "NACIONAL", periodicidad: "Mensual",
+      diaHabilFijo: bandaDigitosSeguridadSocial(ultimosDosDigitosNit), ventanaInicio: inicioMesActual, verificado: true,
+      nota: "Plazo según los 2 últimos dígitos del NIT (Decreto 780 de 2016, art. 3.2.2.1) — mes vencido",
+    };
+    const retencion = retencionVigente(posicionDigito(ultimoDigito) || 10);
+    const mesDeclaradoIdx = ((retencion.mes - 2) + 12) % 12;
+    const anioDeclarado = retencion.mes === 1 ? 2025 : 2026;
+    const filaRetencion = {
+      impuesto: `Retención en la fuente (${NOMBRES_MESES[mesDeclaradoIdx]} ${anioDeclarado})`,
+      ambito: "NACIONAL", periodicidad: "Mensual", fecha: retencion.fecha, verificado: true,
+      nota: "Fecha según el último dígito del NIT — calendario tributario DIAN 2026",
+    };
+    const ica = icaVigente();
+    const filaIca = {
+      impuesto: `ICA Bogotá bimestre ${ica.periodo} 2026`,
+      ambito: "DISTRITAL", periodicidad: "Bimestral", fecha: ica.fecha, verificado: true,
+      nota: "Fecha única, no depende del NIT — Resolución SDH-000195 de 2025",
+    };
+    return [filaRetencion, filaIca, filaIva, filaSeguridadSocial].map((c) => {
+      const fechaCalculada = c.diaHabilFijo
+        ? fechaHabilN(c.ventanaInicio, c.diaHabilFijo)
+        : c.dependeNit ? fechaHabilN(c.ventanaInicio, posicionDigito(ultimoDigito)) : c.fecha;
       const diasRestantes = Math.round((new Date(fechaCalculada) - new Date(hoy())) / 86400000);
       return { ...c, fechaCalculada, diasRestantes };
     }).sort((a, b) => a.diasRestantes - b.diasRestantes);
-  }, [ultimoDigito, ivaPeriodicidad]);
+  }, [ultimoDigito, ultimosDosDigitosNit, ivaPeriodicidad]);
 
   const alertasCalendario = calendarioPersonalizado.filter((c) => c.diasRestantes >= 0 && c.diasRestantes <= umbralAlerta);
 
@@ -549,7 +856,7 @@ export default function AppCompleta() {
     () =>
       operaciones
         .filter((o) => o.tipo === "VENTA")
-        .map((v) => ({ ...v, pendiente: v.valor + v.iva - (v.retencionIca || 0) - (v.retencionIva || 0) - (v.retencionFuente || 0) - operaciones.filter((c) => c.tipo === "COBRO" && c.relId === v.id).reduce((s, c) => s + c.valor, 0), antiguedad: antiguedad(v.fechaVencimiento) }))
+        .map((v) => ({ ...v, pendiente: v.valor + v.iva - (v.retencionIca || 0) - (v.retencionIva || 0) - (v.retencionFuente || 0) - operaciones.filter((c) => c.tipo === "COBRO" && String(c.relId) === v.id).reduce((s, c) => s + c.valor, 0), antiguedad: antiguedad(v.fechaVencimiento) }))
         .filter((v) => v.pendiente > 0),
     [operaciones]
   );
@@ -557,7 +864,7 @@ export default function AppCompleta() {
     () =>
       operaciones
         .filter((o) => o.tipo === "COMPRA" || o.tipo === "GASTO")
-        .map((c) => ({ ...c, pendiente: c.valor + c.iva - (c.retencionIca || 0) - (c.retencionIva || 0) - (c.retencionFuente || 0) - operaciones.filter((p) => p.tipo === "PAGO" && p.relId === c.id).reduce((s, p) => s + p.valor, 0), antiguedad: antiguedad(c.fechaVencimiento) }))
+        .map((c) => ({ ...c, pendiente: c.valor + c.iva - (c.retencionIca || 0) - (c.retencionIva || 0) - (c.retencionFuente || 0) - operaciones.filter((p) => p.tipo === "PAGO" && String(p.relId) === c.id).reduce((s, p) => s + p.valor, 0), antiguedad: antiguedad(c.fechaVencimiento) }))
         .filter((c) => c.pendiente > 0),
     [operaciones]
   );
@@ -621,7 +928,7 @@ export default function AppCompleta() {
       if (v.antiguedad === "AL DIA") grupos[nombre].alDia += v.pendiente; else grupos[nombre].vencida += v.pendiente;
     });
     return Object.values(grupos).sort((a, b) => b.total - a.total);
-  }, [ventasPendientes]);
+  }, [ventasPendientes, clientes]);
 
   const cxpPorProveedor = useMemo(() => {
     const grupos = {};
@@ -633,7 +940,7 @@ export default function AppCompleta() {
       if (c.antiguedad === "AL DIA") grupos[nombre].alDia += c.pendiente; else grupos[nombre].vencida += c.pendiente;
     });
     return Object.values(grupos).sort((a, b) => b.total - a.total);
-  }, [comprasPendientes]);
+  }, [comprasPendientes, proveedores]);
 
   const movimientosCaja = useMemo(
     () => operaciones.filter((o) => ["COBRO", "PAGO", "GASTO", "NOMINA", "ANTICIPO_RECIBIDO", "ANTICIPO_ENTREGADO"].includes(o.tipo)),
@@ -762,62 +1069,83 @@ export default function AppCompleta() {
   );
 
   function registrarOperacion(op) {
-    setOperaciones((os) => {
-      const opId = Date.now();
-      const fechaVencimiento = op.fechaVencimiento || ((op.tipo === "VENTA" || op.tipo === "COMPRA" || op.tipo === "GASTO") && op.formaPago === "CREDITO"
-        ? new Date(new Date(op.fecha).getTime() + 30 * 86400000).toISOString().slice(0, 10)
-        : null);
-      const base = { ...op, id: opId, fechaVencimiento };
-      const nuevas = [base];
-      if ((op.tipo === "VENTA" || op.tipo === "COMPRA" || op.tipo === "GASTO") && op.formaPago === "CONTADO") {
-        nuevas.push({
-          id: opId + 1,
-          tipo: op.tipo === "VENTA" ? "COBRO" : "PAGO",
-          fecha: op.fecha,
-          concepto: `${op.tipo === "VENTA" ? "Cobro" : "Pago"} de contado · ${op.concepto}`,
-          valor: op.valor + op.iva,
-          iva: 0,
-          clienteId: op.tipo === "VENTA" ? op.clienteId : null,
-          proveedorId: op.tipo === "COMPRA" || op.tipo === "GASTO" ? op.proveedorId : null,
-          cuentaId: op.cuentaId,
-          relId: opId,
-        });
-      }
-      return [...nuevas, ...os];
-    });
+    const opId = Date.now();
+    const fechaVencimiento = op.fechaVencimiento || ((op.tipo === "VENTA" || op.tipo === "COMPRA" || op.tipo === "GASTO") && op.formaPago === "CREDITO"
+      ? new Date(new Date(op.fecha).getTime() + 30 * 86400000).toISOString().slice(0, 10)
+      : null);
+    const base = { ...op, id: opId, fechaVencimiento };
+    crearOperacionEnBD(base);
+
+    let generada = null;
+    if ((op.tipo === "VENTA" || op.tipo === "COMPRA" || op.tipo === "GASTO") && op.formaPago === "CONTADO") {
+      generada = {
+        id: opId + 1,
+        tipo: op.tipo === "VENTA" ? "COBRO" : "PAGO",
+        fecha: op.fecha,
+        concepto: `${op.tipo === "VENTA" ? "Cobro" : "Pago"} de contado · ${op.concepto}`,
+        valor: op.valor + op.iva,
+        iva: 0,
+        clienteId: op.tipo === "VENTA" ? op.clienteId : null,
+        proveedorId: op.tipo === "COMPRA" || op.tipo === "GASTO" ? op.proveedorId : null,
+        cuentaId: op.cuentaId,
+        relId: String(opId),
+      };
+      crearOperacionEnBD(generada);
+    }
+
+    // La sincronización a OneDrive va DESPUÉS de que Supabase ya aceptó el
+    // registro — OneDrive nunca es una condición para que el registro
+    // funcione, es solo un respaldo en Excel.
+    if (base.tipo === "NOMINA") {
+      sincronizarConGraph(GraphSync.sincronizarNomina, { ...base, colaboradorNombre: colaboradores.find((c) => c.id === base.colaboradorId)?.nombre });
+    } else {
+      sincronizarConGraph(GraphSync.sincronizarRegistro, base);
+    }
+    // Se devuelve el registro ya con su id real (asignado arriba) — quien
+    // llama lo necesita, por ejemplo, para armar el nombre del PDF del
+    // comprobante recién creado (antes usaba el payload original, que
+    // nunca tuvo id, y el archivo quedaba subido a OneDrive como
+    // "..._undefined_...").
+    return base;
   }
 
   function actualizarOperacion(id, cambios) {
-    setOperaciones((os) => os.map((o) => {
-      if (o.id !== id) return o;
-      // Solo se recalcula/toca la fecha de vencimiento cuando la edición es de
-      // una VENTA/COMPRA completa (viene "tipo" en los cambios, como desde el
-      // formulario de Registro) — así una corrección puntual de un cobro/pago
-      // (que solo trae valor/fecha/cuenta) no borra la fecha ya guardada.
-      if (cambios.tipo === "VENTA" || cambios.tipo === "COMPRA" || cambios.tipo === "GASTO") {
-        const fechaVencimiento = cambios.fechaVencimiento || (cambios.formaPago === "CREDITO"
-          ? new Date(new Date(cambios.fecha).getTime() + 30 * 86400000).toISOString().slice(0, 10)
-          : null);
-        return { ...o, ...cambios, fechaVencimiento };
-      }
-      return { ...o, ...cambios };
-    }));
+    const actual = operaciones.find((o) => o.id === id);
+    if (!actual) return;
+    if (cambios.tipo === "VENTA" || cambios.tipo === "COMPRA" || cambios.tipo === "GASTO") {
+      const fechaVencimiento = cambios.fechaVencimiento || (cambios.formaPago === "CREDITO"
+        ? new Date(new Date(cambios.fecha).getTime() + 30 * 86400000).toISOString().slice(0, 10)
+        : null);
+      actualizarOperacionEnBD(id, { ...cambios, fechaVencimiento });
+    } else {
+      actualizarOperacionEnBD(id, cambios);
+    }
   }
 
   function eliminarOperacion(id) {
-    setOperaciones((os) => os.filter((o) => o.id !== id));
+    eliminarOperacionEnBD(id);
   }
 
   function crearProyecto(cotizacionId, nombre) {
     const q = cotizaciones.find((x) => x.id === cotizacionId);
     if (!q || proyectos.some((p) => p.cotizacionId === q.id)) return;
     const numeroCompleto = `${q.numero}-${q.revision}`;
-    setProyectos((ps) => [...ps, { id: `p${ps.length + 2}`, nombre: nombre || `${numeroCompleto} · ${q.referencia}`, clienteId: q.clienteId, origen: "COTIZACION", cotizacionId: q.id, cotizacionNumero: numeroCompleto, numeroOrdenCompra: null, valorReferencia: q.subtotal, valorReferenciaConIva: q.total, estado: "ACTIVA" }]);
+    crearProyectoEnBD({ id: `p${Date.now()}`, nombre: nombre || `${numeroCompleto} · ${q.referencia}`, clienteId: q.clienteId, origen: "COTIZACION", cotizacionId: q.id, cotizacionNumero: numeroCompleto, numeroOrdenCompra: null, valorReferencia: q.subtotal, valorReferenciaConIva: q.total, estado: "ACTIVA" });
+  }
+
+  // Si una cotización que ya estaba GANADA (con su proyecto ya creado) se
+  // termina marcando PERDIDA porque el negocio no se concretó, el proyecto
+  // queda como CANCELADA en vez de borrarse — así se conserva cualquier
+  // costo/operación que ya se le hubiera cargado, pero deja de aparecer
+  // como opción para asignar NUEVOS gastos/costos.
+  function cancelarProyectoDeCotizacion(cotizacionId) {
+    const p = proyectos.find((x) => x.cotizacionId === cotizacionId);
+    if (p && p.estado !== "CANCELADA") actualizarProyectoEnBD(p.id, { estado: "CANCELADA" });
   }
 
   function crearProyectoDesdeOC({ clienteId, numeroOrdenCompra, valor, nombre }) {
     if (!clienteId || !valor) return;
-    setProyectos((ps) => [...ps, { id: `p${ps.length + 2}`, nombre: nombre || numeroOrdenCompra, clienteId, origen: "ORDEN_COMPRA", cotizacionId: null, cotizacionNumero: null, numeroOrdenCompra, valorReferencia: Number(valor), valorReferenciaConIva: null, estado: "ACTIVA" }]);
+    crearProyectoEnBD({ id: `p${Date.now()}`, nombre: nombre || numeroOrdenCompra, clienteId, origen: "ORDEN_COMPRA", cotizacionId: null, cotizacionNumero: null, numeroOrdenCompra, valorReferencia: Number(valor), valorReferenciaConIva: null, estado: "ACTIVA" });
   }
 
   // crearUsuario y actualizarUsuario reciben la clave en texto plano SOLO
@@ -827,16 +1155,16 @@ export default function AppCompleta() {
   async function crearUsuario({ clave, ...datos }) {
     const passwordHash = await hashClave(clave);
     const nuevo = { id: `u${Date.now()}`, ...datos, passwordHash };
-    setUsuarios((us) => [...us, nuevo]);
+    crearUsuarioEnBD(nuevo);
     return nuevo.id;
   }
   async function actualizarUsuario(id, { clave, ...cambios }) {
     const passwordHash = clave ? await hashClave(clave) : undefined;
-    setUsuarios((us) => us.map((u) => (u.id === id ? { ...u, ...cambios, ...(passwordHash ? { passwordHash } : {}) } : u)));
+    actualizarUsuarioEnBD(id, { ...cambios, ...(passwordHash ? { passwordHash } : {}) });
   }
   function eliminarUsuario(id) {
     if (id === sesion?.id) return; // no te puedes borrar a ti mismo mientras tienes la sesión abierta
-    setUsuarios((us) => us.filter((u) => u.id !== id));
+    eliminarUsuarioEnBD(id);
   }
 
   if (!sesion) {
@@ -860,6 +1188,10 @@ export default function AppCompleta() {
           .cot-print, .cot-print * { visibility: visible; }
           .cot-print { position: fixed; top: 0; left: 0; width: 100%; }
           .no-print { display: none !important; }
+          /* Sin esto, los navegadores ocultan los fondos de color al
+             imprimir por defecto (para ahorrar tinta) — con esto, el
+             sombreado verde de la plantilla sí sale en el PDF. */
+          * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
         }
       `}</style>
       <div className="h-[5px] shrink-0 bg-amber-400" />
@@ -911,13 +1243,23 @@ export default function AppCompleta() {
 
       <main className="flex-1 overflow-x-hidden p-4 sm:p-8">
         <div className="mx-auto max-w-4xl">
+          <AlertaConexionMicrosoft />
+          {errorSyncOneDrive && (
+            <div className="mb-4 flex items-start gap-2 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+              <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+              <p className="flex-1">{errorSyncOneDrive}</p>
+              <button onClick={() => setErrorSyncOneDrive(null)} className="shrink-0 rounded p-0.5 text-rose-500 hover:bg-rose-100" title="Descartar aviso">
+                <X size={14} />
+              </button>
+            </div>
+          )}
           {rolActual.soloLectura && (
             <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
               <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="5" y="11" width="14" height="9" rx="1.5" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
               Estás en modo <span className="font-semibold">Seguimiento y Evaluación</span> — puedes consultar toda la información, pero el registro de nuevas operaciones está bloqueado.
             </div>
           )}
-          {vista === "registro" && (
+          {vista === "registro" && puedeVer("registro") && (
             <VistaRegistro
               tipoInicial={tipoRegistroInicial}
               onRegistrar={registrarOperacion}
@@ -943,19 +1285,44 @@ export default function AppCompleta() {
               ordenesProduccion={ordenesProduccion}
               productosTerminados={productosTerminados}
               soloLectura={rolActual.soloLectura}
+              onNominaMensualExportada={(filas) => sincronizarConGraph(GraphSync.sincronizarNominaMensual, filas)}
+              onPdfNominaListo={(nomina, blob) => sincronizarConGraph(GraphSync.subirPdfNomina, nomina, blob)}
+              onPdfComprobanteListo={(operacion, tercero, blob) => sincronizarConGraph(GraphSync.subirPdfComprobante, operacion, tercero, blob)}
+              onExcelNominaMensualListo={(mesNomina, blob) => sincronizarConGraph(GraphSync.subirExcelNominaMensual, mesNomina, blob)}
+              onPdfNominaMensualListo={(mesNomina, blob) => sincronizarConGraph(GraphSync.subirPdfNominaMensual, mesNomina, blob)}
             />
           )}
-          {vista === "cotizaciones" && (
-            <VistaCotizaciones cotizaciones={cotizaciones} setCotizaciones={setCotizaciones} proyectos={proyectos} crearProyecto={crearProyecto} cliente={cliente} clientes={clientes} crearCliente={crearCliente} operaciones={operaciones} soloLectura={rolActual.soloLectura} nit={nit} />
+          {vista === "comercial" && puedeVer("comercial") && (
+            <VistaComercial
+              cotizaciones={cotizaciones} crearCotizacionEnBD={crearCotizacionEnBD} actualizarCotizacionEnBD={actualizarCotizacionEnBD} eliminarCotizacionEnBD={eliminarCotizacionEnBD}
+              proyectos={proyectos} crearProyecto={crearProyecto} cliente={cliente} clientes={clientes} crearCliente={crearCliente} operaciones={operaciones}
+              soloLectura={rolActual.soloLectura} nit={nit}
+              onGuardada={(q) => sincronizarConGraph(GraphSync.sincronizarCotizacion, q)}
+              onItemCatalogoCreado={(item) => sincronizarConGraph(GraphSync.sincronizarItemCatalogo, item)}
+              onPdfGenerado={(cotizacion, blob) => sincronizarConGraph(GraphSync.subirPdfCotizacion, cotizacion, blob)}
+              onEstadoCotizacionActualizado={(numeroCompleto, cambios) => sincronizarConGraph(GraphSync.actualizarEstadoCotizacionEnGraph, numeroCompleto, cambios)}
+              proveedores={proveedores} crearProveedor={crearProveedor} actualizarCliente={actualizarCliente} actualizarProveedor={actualizarProveedor}
+              eliminarCliente={eliminarCliente} eliminarProveedor={eliminarProveedor}
+              onExportar={() => sincronizarConGraph(GraphSync.sincronizarTercerosCompleto, clientes, proveedores)}
+              metaVentas={metaVentas} setMetaVentas={setMetaVentas}
+              onTareaCreada={(t) => sincronizarConGraph(GraphSync.crearEventoCalendario, t)}
+              onTareaActualizada={(t) => sincronizarConGraph(GraphSync.actualizarEventoCalendario, t)}
+              onEventoTareaEliminado={(eventoId) => sincronizarConGraph(GraphSync.eliminarEventoCalendario, eventoId)}
+              onCancelarProyecto={cancelarProyectoDeCotizacion}
+            />
           )}
-          {vista === "proyectos" && <VistaProyectos proyectos={proyectosConCosteo} cliente={cliente} proveedor={proveedor} crearProyectoDesdeOC={crearProyectoDesdeOC} clientes={clientes} crearCliente={crearCliente} operaciones={operaciones} actualizarOperacion={actualizarOperacion} registrarOperacion={registrarOperacion} colaboradores={colaboradores} proveedores={proveedores} crearProveedor={crearProveedor} ordenesProduccion={ordenesProduccion} productosTerminados={productosTerminados} costosPorOrden={costosPorOrden} soloLectura={rolActual.soloLectura} />}
-          {vista === "presupuesto" && <VistaPresupuesto costos={costosPresupuesto} setCostos={setCostosPresupuesto} proyectos={proyectosConCosteo} operaciones={operaciones} colaboradores={colaboradores} soloLectura={rolActual.soloLectura} />}
-          {vista === "prestaciones" && (
+          {vista === "cotizaciones" && puedeVer("cotizaciones") && (
+            <VistaCotizaciones cotizaciones={cotizaciones} crearCotizacionEnBD={crearCotizacionEnBD} actualizarCotizacionEnBD={actualizarCotizacionEnBD} eliminarCotizacionEnBD={eliminarCotizacionEnBD} proyectos={proyectos} crearProyecto={crearProyecto} cliente={cliente} clientes={clientes} crearCliente={crearCliente} operaciones={operaciones} soloLectura={rolActual.soloLectura} nit={nit} onGuardada={(q) => sincronizarConGraph(GraphSync.sincronizarCotizacion, q)} onItemCatalogoCreado={(item) => sincronizarConGraph(GraphSync.sincronizarItemCatalogo, item)} onPdfGenerado={(cotizacion, blob) => sincronizarConGraph(GraphSync.subirPdfCotizacion, cotizacion, blob)} onEstadoCotizacionActualizado={(numeroCompleto, cambios) => sincronizarConGraph(GraphSync.actualizarEstadoCotizacionEnGraph, numeroCompleto, cambios)} onCancelarProyecto={cancelarProyectoDeCotizacion} />
+          )}
+          {vista === "proyectos" && puedeVer("proyectos") && <VistaProyectos proyectos={proyectosConCosteo} cliente={cliente} proveedor={proveedor} crearProyectoDesdeOC={crearProyectoDesdeOC} eliminarProyectoEnBD={eliminarProyectoEnBD} clientes={clientes} crearCliente={crearCliente} operaciones={operaciones} actualizarOperacion={actualizarOperacion} registrarOperacion={registrarOperacion} colaboradores={colaboradores} proveedores={proveedores} crearProveedor={crearProveedor} ordenesProduccion={ordenesProduccion} productosTerminados={productosTerminados} costosPorOrden={costosPorOrden} soloLectura={rolActual.soloLectura} onExportar={(filas) => sincronizarConGraph(GraphSync.sincronizarProyectosCompleto, filas)} onPdfInformeListo={(nombre, blob) => sincronizarConGraph(GraphSync.subirPdfInforme, nombre, blob)} />}
+          {vista === "presupuesto" && puedeVer("presupuesto") && <VistaPresupuesto costos={costosPresupuesto} crearCostoEnBD={crearCostoEnBD} actualizarCostoEnBD={actualizarCostoEnBD} eliminarCostoEnBD={eliminarCostoEnBD} proyectos={proyectosConCosteo} operaciones={operaciones} colaboradores={colaboradores} soloLectura={rolActual.soloLectura} onPdfInformeListo={(nombre, blob) => sincronizarConGraph(GraphSync.subirPdfInforme, nombre, blob)} />}
+          {vista === "prestaciones" && puedeVer("prestaciones") && (
             <VistaPrestaciones
               colaboradores={colaboradores}
               liquidaciones={liquidaciones}
               registrarLiquidacion={registrarLiquidacion}
               actualizarColaborador={actualizarColaborador}
+              eliminarColaborador={eliminarColaborador}
               actualizarLiquidacion={actualizarLiquidacion}
               eliminarLiquidacion={eliminarLiquidacion}
               operaciones={operaciones}
@@ -965,22 +1332,25 @@ export default function AppCompleta() {
               auxilioTransporteLey={auxilioTransporteLey}
               crearColaborador={crearColaborador}
               soloLectura={rolActual.soloLectura}
+              onLiquidacionConfirmada={({ tipo, valores }) => sincronizarConGraph(GraphSync.sincronizarPrestacion, tipo, valores)}
+              onPdfPrestacionListo={(tipo, liq, blob) => sincronizarConGraph(GraphSync.subirPdfPrestacion, tipo, liq, blob)}
             />
           )}
-          {vista === "produccion" && (
+          {vista === "produccion" && puedeVer("produccion") && (
             <VistaProduccion
-              materiasPrimas={materiasPrimas} setMateriasPrimas={setMateriasPrimas}
-              productosTerminados={productosTerminados} setProductosTerminados={setProductosTerminados}
-              listaMateriales={listaMateriales} setListaMateriales={setListaMateriales}
-              ordenesProduccion={ordenesProduccion} setOrdenesProduccion={setOrdenesProduccion}
+              materiasPrimas={materiasPrimas} crearMateriaPrimaEnBD={crearMateriaPrimaEnBD}
+              productosTerminados={productosTerminados} crearProductoTerminadoEnBD={crearProductoTerminadoEnBD}
+              listaMateriales={listaMateriales} crearLineaListaMaterialesEnBD={crearLineaListaMaterialesEnBD}
+              ordenesProduccion={ordenesProduccion} crearOrdenProduccionEnBD={crearOrdenProduccionEnBD} actualizarOrdenProduccionEnBD={actualizarOrdenProduccionEnBD}
               operaciones={operaciones} proyectos={proyectos}
               proveedor={proveedor} actualizarOperacion={actualizarOperacion}
               registrarOperacion={registrarOperacion} proveedores={proveedores} crearProveedor={crearProveedor}
               costosPorOrden={costosPorOrden}
               soloLectura={rolActual.soloLectura}
+              onPdfInformeListo={(nombre, blob) => sincronizarConGraph(GraphSync.subirPdfInforme, nombre, blob)}
             />
           )}
-          {vista === "terceros" && (
+          {vista === "terceros" && puedeVer("terceros") && (
             <VistaTerceros
               clientes={clientes}
               proveedores={proveedores}
@@ -988,12 +1358,15 @@ export default function AppCompleta() {
               crearProveedor={crearProveedor}
               actualizarCliente={actualizarCliente}
               actualizarProveedor={actualizarProveedor}
+              eliminarCliente={eliminarCliente}
+              eliminarProveedor={eliminarProveedor}
               operaciones={operaciones}
               soloLectura={rolActual.soloLectura}
+              onExportar={() => sincronizarConGraph(GraphSync.sincronizarTercerosCompleto, clientes, proveedores)}
             />
           )}
-          {vista === "cxc" && <VistaCXC carteraPorCliente={carteraPorCliente} ventasPendientes={ventasPendientes} cliente={cliente} clienteInfo={clienteInfo} registrarOperacion={registrarOperacion} operaciones={operaciones} actualizarOperacion={actualizarOperacion} eliminarOperacion={eliminarOperacion} soloLectura={rolActual.soloLectura} />}
-          {vista === "cxp" && (
+          {vista === "cxc" && puedeVer("cxc") && <VistaCXC carteraPorCliente={carteraPorCliente} ventasPendientes={ventasPendientes} cliente={cliente} clienteInfo={clienteInfo} registrarOperacion={registrarOperacion} operaciones={operaciones} actualizarOperacion={actualizarOperacion} eliminarOperacion={eliminarOperacion} soloLectura={rolActual.soloLectura} onExportar={(filas) => sincronizarConGraph(GraphSync.sincronizarCarteraCompleto, filas)} onPdfCobroPagoListo={(operacion, tercero, blob) => sincronizarConGraph(GraphSync.subirPdfComprobanteMovimiento, operacion, tercero, blob)} />}
+          {vista === "cxp" && puedeVer("cxp") && (
             <VistaCXP
               cxpPorProveedor={cxpPorProveedor}
               comprasPendientes={comprasPendientes}
@@ -1002,16 +1375,20 @@ export default function AppCompleta() {
               proveedor={proveedor}
               proveedorInfo={proveedorInfo}
               pasivosFinancieros={pasivosFinancieros}
-              setPasivosFinancieros={setPasivosFinancieros}
+              crearPasivoFinancieroEnBD={crearPasivoFinancieroEnBD}
               registrarOperacion={registrarOperacion}
               operaciones={operaciones}
               actualizarOperacion={actualizarOperacion}
               eliminarOperacion={eliminarOperacion}
               soloLectura={rolActual.soloLectura}
+              onExportar={(datos) => sincronizarConGraph(GraphSync.sincronizarCxpCompleto, datos)}
+              proveedores={proveedores} crearProveedor={crearProveedor} actualizarProveedor={actualizarProveedor} eliminarProveedor={eliminarProveedor}
+              onExportarProveedores={() => sincronizarConGraph(GraphSync.sincronizarTercerosCompleto, clientes, proveedores)}
+              onPdfCobroPagoListo={(operacion, tercero, blob) => sincronizarConGraph(GraphSync.subirPdfComprobanteMovimiento, operacion, tercero, blob)}
             />
           )}
-          {vista === "indicadores" && <VistaIndicadores indicadores={indicadores} carteraPorCliente={carteraPorCliente} cxpPorProveedor={cxpPorProveedor} distribucionGastosGenerales={distribucionGastosGenerales} pctGastosProyectos={pctGastosProyectos} pctGastosProduccion={pctGastosProduccion} pendientesPorAsignarMes={pendientesPorAsignarMes} />}
-          {vista === "calendario" && (
+          {vista === "indicadores" && puedeVer("indicadores") && <VistaIndicadores indicadores={indicadores} carteraPorCliente={carteraPorCliente} cxpPorProveedor={cxpPorProveedor} distribucionGastosGenerales={distribucionGastosGenerales} pctGastosProyectos={pctGastosProyectos} pctGastosProduccion={pctGastosProduccion} pendientesPorAsignarMes={pendientesPorAsignarMes} onPdfInformeListo={(nombre, blob) => sincronizarConGraph(GraphSync.subirPdfInforme, nombre, blob)} />}
+          {vista === "calendario" && puedeVer("calendario") && (
             <VistaCalendario
               nit={nit} setNit={setNit}
               ivaPeriodicidad={ivaPeriodicidad} setIvaPeriodicidad={setIvaPeriodicidad}
@@ -1028,7 +1405,7 @@ export default function AppCompleta() {
               soloLectura={rolActual.soloLectura}
             />
           )}
-          {vista === "dashboard" && (
+          {vista === "dashboard" && puedeVer("dashboard") && (
             <VistaDashboard
               resumen={resumen}
               ventasPendientes={ventasPendientes}
@@ -1053,6 +1430,7 @@ export default function AppCompleta() {
               actualizarOperacion={actualizarOperacion}
               colaboradores={colaboradores}
               soloLectura={rolActual.soloLectura}
+              onPdfInformeListo={(nombre, blob) => sincronizarConGraph(GraphSync.subirPdfInforme, nombre, blob)}
             />
           )}
           {vista === "usuarios" && rolActual.id === "ESTRATEGICA" && (
@@ -1066,7 +1444,7 @@ export default function AppCompleta() {
 }
 
 // ==================== REGISTRO ====================
-function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, operaciones, proyectos, ventasPendientes, comprasPendientes, cliente, proveedor, clientes, proveedores, crearCliente, crearProveedor, smmlv, auxilioTransporteLey, colaboradores, crearColaborador, exoneradoAportes, tarifaArl, liquidaciones, ordenesProduccion, productosTerminados, soloLectura }) {
+function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, operaciones, proyectos, ventasPendientes, comprasPendientes, cliente, proveedor, clientes, proveedores, crearCliente, crearProveedor, smmlv, auxilioTransporteLey, colaboradores, crearColaborador, exoneradoAportes, tarifaArl, liquidaciones, ordenesProduccion, productosTerminados, soloLectura, onNominaMensualExportada, onPdfNominaListo, onPdfComprobanteListo, onExcelNominaMensualListo, onPdfNominaMensualListo }) {
   const [tipo, setTipo] = useState(tipoInicial || "VENTA");
   const [form, setForm] = useState({ fecha: hoy(), formaPago: "CREDITO" });
   const [nuevaHoraExtra, setNuevaHoraExtra] = useState({ tipo: "", horas: "" });
@@ -1077,9 +1455,37 @@ function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, ope
   const [nuevoColaborador, setNuevoColaborador] = useState(null);
   const [mesExcelMensual, setMesExcelMensual] = useState(hoy().slice(0, 7));
   const [viendoInformeNominaMes, setViendoInformeNominaMes] = useState(null); // { mes, items, total }
+  const refInformeNominaMes = useRef(null); // nodo del DOM del modal de nómina consolidada — lo usan tanto la descarga manual como la subida a OneDrive
+  const [descargandoInformeNominaMes, setDescargandoInformeNominaMes] = useState(false);
+
+  async function descargarInformeNominaMes() {
+    if (!refInformeNominaMes.current || !viendoInformeNominaMes) return;
+    setDescargandoInformeNominaMes(true);
+    try {
+      const blob = await generarPdfDesdeElemento(refInformeNominaMes.current);
+      const url = URL.createObjectURL(blob);
+      const enlace = document.createElement("a");
+      enlace.href = url;
+      enlace.download = `NominaMensual_${viendoInformeNominaMes.mes}.pdf`;
+      document.body.appendChild(enlace);
+      enlace.click();
+      document.body.removeChild(enlace);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("[PDF] No se pudo generar el PDF de nómina mensual:", error);
+      alert("No se pudo generar el PDF: " + (error?.message || String(error)));
+    } finally {
+      setDescargandoInformeNominaMes(false);
+    }
+  }
 
   function construirInformeNominaMes(mes) {
-    const items = operaciones.filter((o) => o.tipo === "NOMINA" && (o.periodo || o.fecha).slice(0, 7) === mes);
+    // OJO: se filtra por o.fecha (fecha real ISO, YYYY-MM-DD), no por
+    // o.periodo — periodo es una etiqueta de lectura ("Septiembre 2026 -
+    // 1a quincena (1-15)") que nunca empieza por YYYY-MM, así que filtrar
+    // por ella dejaba este informe siempre en 0 pagos. Misma lógica que ya
+    // usa exportarNominaMensualExcel, que sí filtra correctamente por fecha.
+    const items = operaciones.filter((o) => o.tipo === "NOMINA" && o.fecha && o.fecha.slice(0, 7) === mes);
     const total = items.reduce((s, o) => s + o.valor, 0);
     setViendoInformeNominaMes({ mes, items, total });
   }
@@ -1204,7 +1610,7 @@ function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, ope
     // devengados salariales ya cargados, vía calcularSaludPension.
     setForm((f) => {
       const nuevo = {
-        ...f, diasTrabajados, incapacidadDias, diasAusenciaInjustificada: ausenciaDias, incapacidadTipo,
+        ...f, diasTrabajados, incapacidadDias, diasAusenciaInjustificada: ausenciaDias, incapacidadTipo: tipoIncapacidad,
         incapacidadPrimeros2DiasAl100: primeros2diasAl100,
         salarioDevengado: salarioQuincena,
         auxilioTransporte: tieneDerechoAuxilio ? Math.round((auxilioTransporteLey / 30) * diasTrabajados) : 0,
@@ -1465,16 +1871,42 @@ function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, ope
         Valor_pagado_al_trabajador: l.valorPagado, Estado: l.pagarAhora ? "Pagado" : "Solo causado",
       }));
 
-    const wb = XLSX.utils.book_new();
-    const wsNomina = XLSX.utils.json_to_sheet(filasLimpias);
-    XLSX.utils.book_append_sheet(wb, wsNomina, "Nómina del mes");
-    const wsProvisiones = XLSX.utils.json_to_sheet(provisiones);
-    XLSX.utils.book_append_sheet(wb, wsProvisiones, "Provisiones patronales");
-    if (liquidacionesDelMesTodas.length > 0) {
-      const wsLiquidaciones = XLSX.utils.json_to_sheet(liquidacionesDelMesTodas);
-      XLSX.utils.book_append_sheet(wb, wsLiquidaciones, "Liquidaciones del mes");
-    }
-    XLSX.writeFile(wb, `Nomina_mensual_${mesNomina}.xlsx`);
+    // Genera el archivo bajo el modelo exacto de la plantilla oficial de la
+    // empresa (logo, cajas de encabezado, tabla, "Neto pagado" en letras,
+    // provisiones patronales y firmas) en vez de las hojas simples de antes.
+    const filasParaPlantilla = filas.map(({ _baseFactorPrestacional, _baseParafiscales, _arl, ...f }) => f);
+    const [anioNomina, mesNumNomina] = mesNomina.split("-").map(Number);
+    const ultimoDiaNomina = new Date(anioNomina, mesNumNomina, 0).getDate();
+    const mesLabelNomina = `1 ${MESES[mesNumNomina - 1].toUpperCase()} ${anioNomina} - ${MESES[mesNumNomina - 1].toUpperCase()} ${ultimoDiaNomina} ${anioNomina}`;
+    generarLibroNominaMensual({
+      filas: filasParaPlantilla,
+      mesLabel: mesLabelNomina,
+      fechaLiquidacion: new Date(anioNomina, mesNumNomina - 1, ultimoDiaNomina),
+      smmlv,
+      auxilioTransporteLey,
+      exoneradoAportes,
+      liquidacionesDelMes: liquidacionesDelMesTodas,
+    })
+      .then((bufferPlantilla) => {
+        const blob = new Blob([bufferPlantilla], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+        const url = URL.createObjectURL(blob);
+        const enlace = document.createElement("a");
+        enlace.href = url;
+        enlace.download = `Nomina_mensual_${mesNomina}.xlsx`;
+        document.body.appendChild(enlace);
+        enlace.click();
+        document.body.removeChild(enlace);
+        URL.revokeObjectURL(url);
+        // Además del download local, este compilado sube a OneDrive como
+        // archivo APARTE (NominaMensual_2026-09.xlsx) — no se mezcla con
+        // Nomina.xlsx, que es el historial fila por fila de cada pago.
+        onExcelNominaMensualListo?.(mesNomina, blob);
+      })
+      .catch((error) => {
+        console.error("[Nómina mensual] No se pudo generar el archivo:", error);
+        alert("No se pudo generar el archivo de nómina mensual: " + (error?.message || String(error)));
+      });
+    onNominaMensualExportada?.(filas.map((f) => [f.Nombre_del_empleado, mesNomina, f.Salario_devengado, f.Neto_pagado]));
   }
   const inputCls = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-600";
   const labelCls = "mb-1 block text-xs font-medium text-slate-600";
@@ -1545,7 +1977,7 @@ function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, ope
       };
     } else if (tipo === "COBRO" || tipo === "PAGO") {
       if (!form.valor || !form.relId) return;
-      payload = { tipo, fecha: form.fecha, concepto: form.concepto || `${tipo} manual`, valor: valorNum, iva: 0, cuentaId: form.cuentaId, relId: Number(form.relId), clienteId: form.clienteId, proveedorId: form.proveedorId };
+      payload = { tipo, fecha: form.fecha, concepto: form.concepto || `${tipo} manual`, valor: valorNum, iva: 0, cuentaId: form.cuentaId, relId: form.relId, clienteId: form.clienteId, proveedorId: form.proveedorId };
     } else {
       if (!form.valor || !form.concepto) return;
       const tarifaReteFuente = CONCEPTOS_RETEFUENTE.find((c) => c.id === form.conceptoReteFuente)?.tarifa || 0;
@@ -1568,9 +2000,9 @@ function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, ope
     }
     if (editandoId) onActualizar(editandoId, payload);
     else {
-      onRegistrar(payload);
+      const creada = onRegistrar(payload);
       if (tipo === "VENTA" || tipo === "COMPRA" || tipo === "GASTO") {
-        setComprobanteRecienCreado({ operacion: payload, tercero: tipo === "VENTA" ? cliente(payload.clienteId) : proveedor(payload.proveedorId) });
+        setComprobanteRecienCreado({ operacion: creada || payload, tercero: tipo === "VENTA" ? cliente(payload.clienteId) : proveedor(payload.proveedorId) });
       }
     }
     limpiar();
@@ -1640,7 +2072,7 @@ function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, ope
           )}
 
           {(tipo === "VENTA" || tipo === "COMPRA" || tipo === "GASTO" || tipo === "NOMINA") && (
-            <Selector label="Proyecto (opcional)" opciones={[{ id: "", nombre: "Ninguno" }, ...proyectos]} valor={form.unidadOperativaId} onChange={(v) => actualizar("unidadOperativaId", v || null)} />
+            <Selector label="Proyecto (opcional)" opciones={[{ id: "", nombre: "Ninguno" }, ...proyectos.filter((p) => p.estado !== "CANCELADA")]} valor={form.unidadOperativaId} onChange={(v) => actualizar("unidadOperativaId", v || null)} />
           )}
 
           {(tipo === "GASTO" || tipo === "NOMINA" || tipo === "COMPRA") && ordenesProduccion.length > 0 && (
@@ -1811,7 +2243,7 @@ function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, ope
           {tipo === "COBRO" && (
             <div>
               <label className={labelCls}>Factura que liquida</label>
-              <select className={inputCls} value={form.relId || ""} onChange={(e) => { const v = ventasPendientes.find((x) => x.id === Number(e.target.value)); actualizar("relId", e.target.value); actualizar("clienteId", v?.clienteId); }}>
+              <select className={inputCls} value={form.relId || ""} onChange={(e) => { const v = ventasPendientes.find((x) => x.id === e.target.value); actualizar("relId", e.target.value); actualizar("clienteId", v?.clienteId); }}>
                 <option value="">Seleccionar…</option>
                 {ventasPendientes.map((v) => {
                   const totalRete = (v.retencionFuente || 0) + (v.retencionIca || 0) + (v.retencionIva || 0);
@@ -1819,7 +2251,7 @@ function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, ope
                 })}
               </select>
               {form.relId && (() => {
-                const v = ventasPendientes.find((x) => x.id === Number(form.relId));
+                const v = ventasPendientes.find((x) => x.id === form.relId);
                 if (!v) return null;
                 return (
                   <div className="mt-2 space-y-0.5 rounded-lg bg-slate-50 p-2 text-[11px] text-slate-600">
@@ -1836,7 +2268,7 @@ function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, ope
           {tipo === "PAGO" && (
             <div>
               <label className={labelCls}>Factura que liquida</label>
-              <select className={inputCls} value={form.relId || ""} onChange={(e) => { const v = comprasPendientes.find((x) => x.id === Number(e.target.value)); actualizar("relId", e.target.value); actualizar("proveedorId", v?.proveedorId); }}>
+              <select className={inputCls} value={form.relId || ""} onChange={(e) => { const v = comprasPendientes.find((x) => x.id === e.target.value); actualizar("relId", e.target.value); actualizar("proveedorId", v?.proveedorId); }}>
                 <option value="">Seleccionar…</option>
                 {comprasPendientes.map((c) => {
                   const totalRete = (c.retencionFuente || 0) + (c.retencionIca || 0) + (c.retencionIva || 0);
@@ -1844,7 +2276,7 @@ function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, ope
                 })}
               </select>
               {form.relId && (() => {
-                const c = comprasPendientes.find((x) => x.id === Number(form.relId));
+                const c = comprasPendientes.find((x) => x.id === form.relId);
                 if (!c) return null;
                 return (
                   <div className="mt-2 space-y-0.5 rounded-lg bg-slate-50 p-2 text-[11px] text-slate-600">
@@ -2101,7 +2533,7 @@ function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, ope
                 </>
               )}
 
-              <Selector label="Proyecto (opcional — si trabajó en uno específico)" opciones={[{ id: "", nombre: "Ninguno (administrativa/general)" }, ...proyectos]} valor={form.unidadOperativaId} onChange={(v) => actualizar("unidadOperativaId", v || null)} />
+              <Selector label="Proyecto (opcional — si trabajó en uno específico)" opciones={[{ id: "", nombre: "Ninguno (administrativa/general)" }, ...proyectos.filter((p) => p.estado !== "CANCELADA")]} valor={form.unidadOperativaId} onChange={(v) => actualizar("unidadOperativaId", v || null)} />
               <p className="text-[11px] text-slate-500">Si eliges un proyecto, este costo de mano de obra se descuenta de su margen. Si no, queda como nómina general de la empresa.</p>
             </div>
           )}
@@ -2130,6 +2562,7 @@ function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, ope
         <div className="rounded-xl border border-slate-200 bg-white p-5">
           <div className="mb-3 flex items-center justify-between">
             <p className="text-sm font-semibold text-slate-800">Movimientos de tipo {tipo}</p>
+            {tipo === "PAGO" && <p className="text-[11px] text-slate-400">Los pagos de nómina tienen su propia pestaña "NOMINA" — no se mezclan aquí.</p>}
             {tipo === "NOMINA" && movimientosDelTipo.length > 0 && (
               <div className="flex items-center gap-1.5">
                 <button onClick={exportarNominaExcel} className="flex items-center gap-1 rounded bg-green-50 px-2 py-1 text-[11px] font-medium text-green-700 hover:bg-green-100">
@@ -2167,7 +2600,7 @@ function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, ope
       </div>
 
       {comprobanteNomina && (
-        <ComprobanteNomina operacion={comprobanteNomina} colaborador={colaboradores.find((c) => c.id === comprobanteNomina.colaboradorId)} onCerrar={() => setComprobanteNomina(null)} />
+        <ComprobanteNomina operacion={comprobanteNomina} colaborador={colaboradores.find((c) => c.id === comprobanteNomina.colaboradorId)} onCerrar={() => setComprobanteNomina(null)} onPdfListo={onPdfNominaListo} />
       )}
       {previaNomina && (
         <ComprobanteNomina operacion={previaNomina} colaborador={colaboradores.find((c) => c.id === previaNomina.colaboradorId)} onCerrar={() => setPreviaNomina(null)} esPrevia />
@@ -2178,6 +2611,7 @@ function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, ope
           tercero={comprobanteRecienCreado.tercero}
           nitTercero={comprobanteRecienCreado.operacion.tipo === "VENTA" ? clientes.find((c) => c.id === comprobanteRecienCreado.operacion.clienteId)?.nit : proveedores.find((p) => p.id === comprobanteRecienCreado.operacion.proveedorId)?.nit}
           onCerrar={() => setComprobanteRecienCreado(null)}
+          onPdfListo={onPdfComprobanteListo}
         />
       )}
       {previaVentaCompra && (
@@ -2301,7 +2735,7 @@ function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, ope
 
       {viendoInformeNominaMes && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-          <div className="liq-print max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
+          <div ref={refInformeNominaMes} className="liq-print max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
             <div className="mb-4 border-b border-slate-200 pb-3 text-center">
               <p className="text-sm font-semibold text-slate-900">SUA &amp; SERVICE INGENIERÍA S.A.S.</p>
               <p className="text-xs text-slate-500">Nómina consolidada del mes</p>
@@ -2321,8 +2755,9 @@ function VistaRegistro({ tipoInicial, onRegistrar, onActualizar, onEliminar, ope
               </tbody>
             </table>
             <div className="mt-3 flex justify-between border-t border-slate-200 pt-2 text-sm font-semibold"><span>Total neto pagado</span><span>{fmt(viendoInformeNominaMes.total)}</span></div>
-            <div className="no-print mt-5 flex gap-2">
-              <button onClick={() => window.print()} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white hover:bg-green-900"><FileDown size={14} /> PDF</button>
+            <div className="no-print mt-5 flex flex-wrap gap-2">
+              <button onClick={descargarInformeNominaMes} disabled={descargandoInformeNominaMes} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white hover:bg-green-900 disabled:opacity-60"><FileDown size={14} /> {descargandoInformeNominaMes ? "Generando…" : "Descargar PDF"}</button>
+              {onPdfNominaMensualListo && <BotonSubirPdfOneDrive contenedorRef={refInformeNominaMes} onSubir={(blob) => onPdfNominaMensualListo(viendoInformeNominaMes.mes, blob)} />}
               <button onClick={() => setViendoInformeNominaMes(null)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600"><X size={16} /></button>
             </div>
           </div>
@@ -2338,7 +2773,7 @@ function EstadoCuentaCliente({ clienteId, nombreCliente, infoCliente, operacione
     .sort((a, b) => (a.fecha < b.fecha ? -1 : 1))
     .map((f) => {
       const totalRete = (f.retencionFuente || 0) + (f.retencionIca || 0) + (f.retencionIva || 0);
-      const cobros = operaciones.filter((o) => o.tipo === "COBRO" && o.relId === f.id).sort((a, b) => (a.fecha < b.fecha ? -1 : 1));
+      const cobros = operaciones.filter((o) => o.tipo === "COBRO" && String(o.relId) === f.id).sort((a, b) => (a.fecha < b.fecha ? -1 : 1));
       const totalCobrado = cobros.reduce((s, c) => s + c.valor, 0);
       const saldo = f.valor + f.iva - totalRete - totalCobrado;
       return { ...f, totalRete, cobros, totalCobrado, saldo };
@@ -2418,7 +2853,7 @@ function EstadoCuentaProveedor({ proveedorId, nombreProveedor, infoProveedor, op
     .sort((a, b) => (a.fecha < b.fecha ? -1 : 1))
     .map((f) => {
       const totalRete = (f.retencionFuente || 0) + (f.retencionIca || 0) + (f.retencionIva || 0);
-      const pagos = operaciones.filter((o) => o.tipo === "PAGO" && o.relId === f.id).sort((a, b) => (a.fecha < b.fecha ? -1 : 1));
+      const pagos = operaciones.filter((o) => o.tipo === "PAGO" && String(o.relId) === f.id).sort((a, b) => (a.fecha < b.fecha ? -1 : 1));
       const totalPagado = pagos.reduce((s, p) => s + p.valor, 0);
       const saldo = f.valor + f.iva - totalRete - totalPagado;
       return { ...f, totalRete, pagos, totalPagado, saldo };
@@ -2674,15 +3109,53 @@ function ModalRegistrarCostoCompleto({ asignacion, etiquetaDestino, proveedores,
   );
 }
 
-function ComprobanteVentaCompra({ operacion: o, tercero, nitTercero, onCerrar, esPrevia, onConfirmar }) {
+function ComprobanteVentaCompra({ operacion: o, tercero, nitTercero, onCerrar, esPrevia, onConfirmar, onPdfListo }) {
   const esVenta = o.tipo === "VENTA";
   const esGasto = o.tipo === "GASTO";
   const totalRete = (o.retencionFuente || 0) + (o.retencionIca || 0) + (o.retencionIva || 0);
   const neto = o.valor + o.iva - totalRete;
+  const contenedorRef = useRef(null);
+  const yaSubidoRef = useRef(false);
+  const [estadoSubidaPdf, setEstadoSubidaPdf] = useState("pendiente");
+  const [errorSubidaPdf, setErrorSubidaPdf] = useState(null);
+
+  async function intentarSubirPdf() {
+    if (!contenedorRef.current || !onPdfListo) return;
+    setEstadoSubidaPdf("subiendo");
+    setErrorSubidaPdf(null);
+    try {
+      const blob = await generarPdfDesdeElemento(contenedorRef.current);
+      await onPdfListo(o, tercero, blob);
+      setEstadoSubidaPdf("listo");
+    } catch (error) {
+      console.error("[PDF] No se pudo generar/subir el comprobante:", error);
+      setEstadoSubidaPdf("error");
+      setErrorSubidaPdf(error?.message || String(error));
+    }
+  }
+
+  useEffect(() => {
+    // Solo se sube el comprobante YA REGISTRADO — nunca la vista previa.
+    if (esPrevia || yaSubidoRef.current || !onPdfListo) return;
+    yaSubidoRef.current = true;
+    const temporizador = setTimeout(intentarSubirPdf, 400);
+    return () => clearTimeout(temporizador);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [esPrevia]);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-      <div className="liq-print max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
+      <div ref={contenedorRef} className="liq-print max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
         {esPrevia && <p className="no-print mb-3 rounded bg-amber-50 px-2 py-1 text-center text-[11px] font-medium text-amber-700">Vista previa — aún no se ha registrado</p>}
+        {!esPrevia && onPdfListo && (
+          <div className="no-print mb-2 flex items-center gap-2 text-xs">
+            {estadoSubidaPdf === "subiendo" && <span className="text-slate-500">Subiendo comprobante a OneDrive…</span>}
+            {estadoSubidaPdf === "listo" && <span className="text-emerald-600">✓ Comprobante subido a OneDrive</span>}
+            {estadoSubidaPdf === "error" && (
+              <span className="text-rose-600">No se pudo subir a OneDrive ({errorSubidaPdf}) — <button onClick={intentarSubirPdf} className="underline">reintentar</button></span>
+            )}
+          </div>
+        )}
         <div className="mb-4 border-b border-slate-200 pb-3 text-center">
           <p className="text-sm font-semibold text-slate-900">SUA &amp; SERVICE INGENIERÍA S.A.S.</p>
           <p className="text-xs text-slate-500">{esVenta ? "Comprobante de venta" : esGasto ? "Comprobante de gasto" : "Comprobante de compra"}</p>
@@ -2729,12 +3202,52 @@ function ComprobanteVentaCompra({ operacion: o, tercero, nitTercero, onCerrar, e
   );
 }
 
-function ComprobanteMovimiento({ operacion: o, tercero, nitTercero, factura, onCerrar }) {
+function ComprobanteMovimiento({ operacion: o, tercero, nitTercero, factura, onCerrar, esNuevo, onPdfListo }) {
   const esCobro = o.tipo === "COBRO";
   const totalRete = factura ? (factura.retencionFuente || 0) + (factura.retencionIca || 0) + (factura.retencionIva || 0) : 0;
+  const contenedorRef = useRef(null);
+  const yaSubidoRef = useRef(false);
+  const [estadoSubidaPdf, setEstadoSubidaPdf] = useState("pendiente");
+  const [errorSubidaPdf, setErrorSubidaPdf] = useState(null);
+
+  async function intentarSubirPdf() {
+    if (!contenedorRef.current || !onPdfListo) return;
+    setEstadoSubidaPdf("subiendo");
+    setErrorSubidaPdf(null);
+    try {
+      const blob = await generarPdfDesdeElemento(contenedorRef.current);
+      await onPdfListo(o, tercero, blob);
+      setEstadoSubidaPdf("listo");
+    } catch (error) {
+      console.error("[PDF] No se pudo generar/subir el comprobante:", error);
+      setEstadoSubidaPdf("error");
+      setErrorSubidaPdf(error?.message || String(error));
+    }
+  }
+
+  useEffect(() => {
+    // Solo se sube el comprobante de un cobro/pago RECIÉN registrado — nunca
+    // cuando se abre desde "Ver / PDF" en el historial (ese ya se subió, o
+    // es de antes de que existiera esta función).
+    if (!esNuevo || yaSubidoRef.current || !onPdfListo) return;
+    yaSubidoRef.current = true;
+    const temporizador = setTimeout(intentarSubirPdf, 400);
+    return () => clearTimeout(temporizador);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [esNuevo]);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-      <div className="liq-print max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
+      <div ref={contenedorRef} className="liq-print max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
+        {esNuevo && onPdfListo && (
+          <div className="no-print mb-2 flex items-center gap-2 text-xs">
+            {estadoSubidaPdf === "subiendo" && <span className="text-slate-500">Subiendo comprobante a OneDrive…</span>}
+            {estadoSubidaPdf === "listo" && <span className="text-emerald-600">✓ Comprobante subido a OneDrive</span>}
+            {estadoSubidaPdf === "error" && (
+              <span className="text-rose-600">No se pudo subir a OneDrive ({errorSubidaPdf}) — <button onClick={intentarSubirPdf} className="underline">reintentar</button></span>
+            )}
+          </div>
+        )}
         <div className="mb-4 border-b border-slate-200 pb-3 text-center">
           <p className="text-sm font-semibold text-slate-900">SUA &amp; SERVICE INGENIERÍA S.A.S.</p>
           <p className="text-xs text-slate-500">{esCobro ? "Recibo de caja" : "Comprobante de egreso"}</p>
@@ -2771,7 +3284,38 @@ function ComprobanteMovimiento({ operacion: o, tercero, nitTercero, factura, onC
   );
 }
 
-function ComprobanteNomina({ operacion: o, colaborador: col, onCerrar, esPrevia }) {
+function ComprobanteNomina({ operacion: o, colaborador: col, onCerrar, esPrevia, onPdfListo }) {
+  const contenedorRef = useRef(null);
+  const yaSubidoRef = useRef(false);
+  const [estadoSubidaPdf, setEstadoSubidaPdf] = useState("pendiente"); // pendiente | subiendo | listo | error
+  const [errorSubidaPdf, setErrorSubidaPdf] = useState(null);
+
+  async function intentarSubirPdf() {
+    if (!contenedorRef.current || !onPdfListo) return;
+    setEstadoSubidaPdf("subiendo");
+    setErrorSubidaPdf(null);
+    try {
+      const blob = await generarPdfDesdeElemento(contenedorRef.current);
+      await onPdfListo(o, blob);
+      setEstadoSubidaPdf("listo");
+    } catch (error) {
+      console.error("[PDF] No se pudo generar/subir el comprobante de nómina:", error);
+      setEstadoSubidaPdf("error");
+      setErrorSubidaPdf(error?.message || String(error));
+    }
+  }
+
+  useEffect(() => {
+    // Solo se sube el comprobante YA REGISTRADO — nunca la vista previa
+    // (esPrevia), para no llenar OneDrive de PDF de nóminas que ni siquiera
+    // se guardaron.
+    if (esPrevia || yaSubidoRef.current || !onPdfListo) return;
+    yaSubidoRef.current = true;
+    const temporizador = setTimeout(intentarSubirPdf, 400);
+    return () => clearTimeout(temporizador);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [esPrevia]);
+
   return (
     <>
       <style>{`
@@ -2783,9 +3327,18 @@ function ComprobanteNomina({ operacion: o, colaborador: col, onCerrar, esPrevia 
         }
       `}</style>
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-        <div className="comp-print max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
+        <div ref={contenedorRef} className="comp-print max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
           {esPrevia && (
             <p className="no-print mb-3 rounded bg-amber-50 px-2 py-1 text-center text-[11px] font-medium text-amber-700">Vista previa — aún no se ha registrado</p>
+          )}
+          {!esPrevia && onPdfListo && (
+            <div className="no-print mb-2 flex items-center gap-2 text-xs">
+              {estadoSubidaPdf === "subiendo" && <span className="text-slate-500">Subiendo comprobante a OneDrive…</span>}
+              {estadoSubidaPdf === "listo" && <span className="text-emerald-600">✓ Comprobante subido a OneDrive</span>}
+              {estadoSubidaPdf === "error" && (
+                <span className="text-rose-600">No se pudo subir a OneDrive ({errorSubidaPdf}) — <button onClick={intentarSubirPdf} className="underline">reintentar</button></span>
+              )}
+            </div>
           )}
           <div className="mb-4 border-b border-slate-200 pb-3 text-center">
             <p className="text-sm font-semibold text-slate-900">SUA &amp; SERVICE INGENIERÍA S.A.S.</p>
@@ -2856,7 +3409,636 @@ function FilaComprobante({ label, valor }) {
 }
 
 // ==================== COTIZACIONES ====================
-function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProyecto, cliente, clientes, crearCliente, operaciones, soloLectura, nit }) {
+// Vista combinada para el rol Comercial: Cotizaciones + Terceros + un
+// dashboard propio del área (embudo de cotizaciones, metas), todo en un
+// solo módulo — así el rol Comercial no necesita acceso a Control de
+// mando ni a ningún otro módulo financiero/operativo para poder trabajar
+// y conectarse a Microsoft 365 (la conexión vive aquí dentro, no en
+// Calendario, que este rol no puede ver).
+function VistaComercial(props) {
+  const { cotizaciones, clientes, cliente, metaVentas, setMetaVentas, soloLectura, onTareaCreada, onTareaActualizada, onEventoTareaEliminado, actualizarCotizacionEnBD, crearProyecto, proyectos, onCancelarProyecto, onEstadoCotizacionActualizado } = props;
+  const inputCls = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-600";
+  const labelCls = "mb-1 block text-xs font-medium text-slate-600";
+  const [pestana, setPestana] = useState("dashboard");
+  // Cuál de los 3 grupos desplegables del dashboard está abierto ahora
+  // mismo — null = ninguno, todos colapsados.
+  const [grupoAbierto, setGrupoAbierto] = useState(null); // "GANADA" | "SEGUIMIENTO" | "PERDIDA" | null
+
+  // Tareas de seguimiento comercial (llamar, enviar correo, etc.), cada una
+  // ligada a una cotización — el "calendario propio" de Comercial.
+  const {
+    registros: tareasComerciales,
+    crear: crearTareaComercial,
+    actualizar: actualizarTareaComercial,
+    eliminar: eliminarTareaComercial,
+  } = useColeccionSupabase("tareas_comerciales");
+  const [tareaEnCreacion, setTareaEnCreacion] = useState(null); // { cotizacionId, tipo, fecha, nota }
+  const [confirmandoEliminarTarea, setConfirmandoEliminarTarea] = useState(null);
+
+  // Cambiar el estado de una cotización directamente desde el dashboard,
+  // sin tener que ir hasta la pestaña Cotizaciones.
+  const [marcandoPerdidaDashId, setMarcandoPerdidaDashId] = useState(null);
+  const [motivoPerdidaDashTexto, setMotivoPerdidaDashTexto] = useState("");
+  // Para poder avisarle a Graph/Excel CUÁL cotización cambió de estado
+  // (Excel identifica las filas por "numero-revision", no por el id de
+  // Supabase).
+  function numeroCompletoDe(id) {
+    const q = cotizaciones.find((x) => x.id === id);
+    return q ? `${q.numero}-${q.revision}` : null;
+  }
+  function marcarGanadaDash(id) {
+    actualizarCotizacionEnBD(id, { estado: "GANADA" });
+    crearProyecto?.(id);
+    onEstadoCotizacionActualizado?.(numeroCompletoDe(id), { estado: "GANADA" });
+  }
+  function marcarPerdidaDash(id, motivo) {
+    actualizarCotizacionEnBD(id, { estado: "PERDIDA", motivoPerdida: motivo || null });
+    onCancelarProyecto?.(id); // no-op si la cotización no tenía proyecto (aún no estaba ganada)
+    onEstadoCotizacionActualizado?.(numeroCompletoDe(id), { estado: "PERDIDA", motivoPerdida: motivo || null });
+  }
+  function volverASeguimientoDash(id) {
+    actualizarCotizacionEnBD(id, { estado: "ENVIADA", motivoPerdida: null });
+    onEstadoCotizacionActualizado?.(numeroCompletoDe(id), { estado: "ENVIADA" });
+  }
+
+  const resumen = useMemo(() => {
+    // REEMPLAZADA (versiones viejas de una cotización) e INHABILITADA
+    // (marcadas como tal a mano) no cuentan para el embudo del dashboard
+    // — si no se excluyen acá, caían por defecto en BORRADOR y se veían
+    // como si estuvieran en seguimiento activo sin estarlo.
+    const vigentes = cotizaciones.filter((q) => q.estado !== "REEMPLAZADA" && q.estado !== "INHABILITADA");
+    const porEstado = { BORRADOR: [], ENVIADA: [], GANADA: [], PERDIDA: [] };
+    vigentes.forEach((q) => { (porEstado[q.estado] || porEstado.BORRADOR).push(q); });
+    const suma = (arr) => arr.reduce((s, q) => s + (q.total || 0), 0);
+    const cerradas = porEstado.GANADA.length + porEstado.PERDIDA.length;
+    const tasaConversion = cerradas > 0 ? (porEstado.GANADA.length / cerradas) * 100 : null;
+
+    // "Seguimiento" agrupa lo que sigue abierto (Borrador + Enviada) — es
+    // el grupo donde tiene sentido agregar tareas de seguimiento, porque
+    // Ganada/Perdida ya son un cierre.
+    const seguimiento = [...porEstado.BORRADOR, ...porEstado.ENVIADA].sort((a, b) => (b.fecha || "").localeCompare(a.fecha || ""));
+
+    const ahora = new Date();
+    const mesActual = ahora.toISOString().slice(0, 7); // "YYYY-MM"
+    const ganadasEsteMes = porEstado.GANADA.filter((q) => (q.fecha || "").slice(0, 7) === mesActual);
+    const totalGanadoMes = suma(ganadasEsteMes);
+
+    // Últimos 6 meses (incluido el actual), para el gráfico mes a mes.
+    const meses = [];
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(ahora.getFullYear(), ahora.getMonth() - i, 1);
+      const clave = d.toISOString().slice(0, 7);
+      const nombre = d.toLocaleDateString("es-CO", { month: "short" });
+      const ganadoMes = suma(porEstado.GANADA.filter((q) => (q.fecha || "").slice(0, 7) === clave));
+      meses.push({ clave, nombre, valor: ganadoMes });
+    }
+
+    // Las inhabilitadas se calculan aparte, solo a manera informativa — NO
+    // entran al embudo (Ganadas/Seguimiento/Perdidas), que sigue siendo
+    // sobre "vigentes" como antes. El % se muestra sobre el universo total
+    // de cotizaciones que sí cuentan para algo (vigentes + inhabilitadas),
+    // sin contar las versiones REEMPLAZADAS (esas no son cotizaciones
+    // aparte, son historial de una misma cotización).
+    const inhabilitadas = cotizaciones.filter((q) => q.estado === "INHABILITADA");
+    const totalConInhabilitadas = vigentes.length + inhabilitadas.length;
+
+    return { porEstado, seguimiento, suma, cerradas, tasaConversion, totalGanadoMes, mesActual, meses, totalVigentes: vigentes.length, inhabilitadas, totalConInhabilitadas };
+  }, [cotizaciones]);
+
+  const pctMeta = metaVentas > 0 ? Math.min(100, Math.round((resumen.totalGanadoMes / metaVentas) * 100)) : null;
+
+  const hoyISO = new Date().toISOString().slice(0, 10);
+  // Tareas pendientes ordenadas por fecha — la agenda de Seguimiento;
+  // vencida = ya pasó la fecha y sigue sin marcarse como hecha.
+  const tareasPendientes = useMemo(
+    () => tareasComerciales.filter((t) => !t.completada).sort((a, b) => (a.fecha || "").localeCompare(b.fecha || "")),
+    [tareasComerciales]
+  );
+  function tareasDeCotizacion(cotizacionId) {
+    return tareasComerciales.filter((t) => t.cotizacionId === cotizacionId);
+  }
+  function rangoHoras(t) {
+    if (t.horaInicio && t.horaFin) return `${t.horaInicio}–${t.horaFin}`;
+    if (t.horaInicio) return `desde ${t.horaInicio}`;
+    return "";
+  }
+  async function guardarTareaNueva() {
+    if (!tareaEnCreacion?.tipo || !tareaEnCreacion?.fecha) return;
+    const q = cotizaciones.find((c) => c.id === tareaEnCreacion.cotizacionId);
+    const tituloExtra = q ? `${q.numero}-${q.revision} · ${cliente(q.clienteId)}` : undefined;
+    if (tareaEnCreacion.id) {
+      // Reprogramar/editar una tarea existente: se actualiza en la agenda
+      // interna de Comercial y, si ya tenía un evento sincronizado en el
+      // Calendario de Outlook (eventoCalendarioId), también se actualiza
+      // allá (PATCH) para que quede la misma fecha/hora en los dos lados.
+      const { id, ...cambios } = tareaEnCreacion;
+      actualizarTareaComercial(id, cambios);
+      onTareaActualizada?.({ ...cambios, tituloExtra });
+    } else {
+      // Genera el id acá mismo (en vez de dejar que Supabase lo asigne),
+      // para poder guardar de una vez el id del evento de Outlook en la
+      // misma fila — así no hay que esperar a que la suscripción en
+      // tiempo real traiga la fila recién creada para poder actualizarla.
+      // La columna "id" de tareas_comerciales es de tipo uuid (a
+      // diferencia de proyectos, que usa ids de texto tipo "p172..."), así
+      // que hay que generar un uuid real — un texto cualquiera como
+      // "t172..." lo rechaza Postgres con "invalid input syntax for type uuid".
+      const idTarea = crypto.randomUUID();
+      const eventoCreado = await onTareaCreada?.({ ...tareaEnCreacion, tituloExtra });
+      crearTareaComercial({
+        id: idTarea, ...tareaEnCreacion, completada: false, creadaEn: new Date().toISOString(),
+        eventoCalendarioId: eventoCreado?.id || null,
+      });
+    }
+    setTareaEnCreacion(null);
+  }
+  function editarTarea(t) {
+    setTareaEnCreacion({ ...t });
+  }
+  function eliminarTareaConfirmada(id) {
+    const t = tareasComerciales.find((x) => x.id === id);
+    if (t?.eventoCalendarioId) onEventoTareaEliminado?.(t.eventoCalendarioId);
+    eliminarTareaComercial(id);
+    setConfirmandoEliminarTarea(null);
+  }
+
+  return (
+    <div>
+      <h1 className="mb-1 text-xl font-semibold">Comercial</h1>
+      <p className="mb-5 text-sm text-slate-500">Cotizaciones, terceros y el estado del área comercial.</p>
+
+      <div className="mb-5 flex gap-2 border-b border-slate-200">
+        {[
+          { id: "dashboard", label: "Dashboard" },
+          { id: "cotizaciones", label: "Cotizaciones" },
+          { id: "terceros", label: "Terceros" },
+        ].map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setPestana(t.id)}
+            className={`border-b-2 px-3 py-2 text-sm font-medium ${pestana === t.id ? "border-amber-500 text-amber-700" : "border-transparent text-slate-500 hover:text-slate-700"}`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {pestana === "dashboard" && (
+        <div>
+          <div className="mb-5">
+            <ConexionMicrosoft />
+          </div>
+
+          {/* Ganadas / Seguimiento / Perdidas — desplegables: clic en cada
+              tarjeta muestra el detalle debajo, en vez de mandar a otra
+              pantalla. Seguimiento junta Borrador + Enviada (todo lo que
+              sigue abierto) y es donde se agregan tareas. */}
+          <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-4">
+            <button
+              onClick={() => setGrupoAbierto(grupoAbierto === "GANADA" ? null : "GANADA")}
+              className={`rounded-xl border p-4 text-left transition ${grupoAbierto === "GANADA" ? "border-emerald-400 bg-emerald-100" : "border-emerald-200 bg-emerald-50 hover:bg-emerald-100"}`}
+            >
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-medium text-emerald-700">Ganadas</p>
+                <ChevronDown size={14} className={`text-emerald-600 transition-transform ${grupoAbierto === "GANADA" ? "rotate-180" : ""}`} />
+              </div>
+              <p className="mt-1 text-lg font-semibold text-emerald-800">{resumen.porEstado.GANADA.length}</p>
+              <p className="text-[11px] text-emerald-600">{fmt(resumen.suma(resumen.porEstado.GANADA))}</p>
+            </button>
+
+            <button
+              onClick={() => setGrupoAbierto(grupoAbierto === "SEGUIMIENTO" ? null : "SEGUIMIENTO")}
+              className={`rounded-xl border p-4 text-left transition ${grupoAbierto === "SEGUIMIENTO" ? "border-blue-400 bg-blue-100" : "border-blue-200 bg-blue-50 hover:bg-blue-100"}`}
+            >
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-medium text-blue-700">Seguimiento</p>
+                <ChevronDown size={14} className={`text-blue-600 transition-transform ${grupoAbierto === "SEGUIMIENTO" ? "rotate-180" : ""}`} />
+              </div>
+              <p className="mt-1 text-lg font-semibold text-blue-800">{resumen.seguimiento.length}</p>
+              <p className="text-[11px] text-blue-600">
+                {fmt(resumen.suma(resumen.seguimiento))}
+                {tareasPendientes.length > 0 && ` · ${tareasPendientes.length} tarea${tareasPendientes.length === 1 ? "" : "s"} pendiente${tareasPendientes.length === 1 ? "" : "s"}`}
+              </p>
+            </button>
+
+            <button
+              onClick={() => setGrupoAbierto(grupoAbierto === "PERDIDA" ? null : "PERDIDA")}
+              className={`rounded-xl border p-4 text-left transition ${grupoAbierto === "PERDIDA" ? "border-rose-400 bg-rose-100" : "border-rose-200 bg-rose-50 hover:bg-rose-100"}`}
+            >
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-medium text-rose-700">Perdidas</p>
+                <ChevronDown size={14} className={`text-rose-600 transition-transform ${grupoAbierto === "PERDIDA" ? "rotate-180" : ""}`} />
+              </div>
+              <p className="mt-1 text-lg font-semibold text-rose-800">{resumen.porEstado.PERDIDA.length}</p>
+              <p className="text-[11px] text-rose-600">{fmt(resumen.suma(resumen.porEstado.PERDIDA))}</p>
+            </button>
+
+            <button
+              onClick={() => setGrupoAbierto(grupoAbierto === "INHABILITADA" ? null : "INHABILITADA")}
+              title="Informativo — no participa del embudo de Ganadas/Seguimiento/Perdidas"
+              className={`rounded-xl border p-4 text-left transition ${grupoAbierto === "INHABILITADA" ? "border-slate-400 bg-slate-200" : "border-slate-300 bg-slate-100 hover:bg-slate-200"}`}
+            >
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-medium text-slate-600">Inhabilitadas <span className="italic">(informativo)</span></p>
+                <ChevronDown size={14} className={`text-slate-500 transition-transform ${grupoAbierto === "INHABILITADA" ? "rotate-180" : ""}`} />
+              </div>
+              <p className="mt-1 text-lg font-semibold text-slate-700">{resumen.inhabilitadas.length}</p>
+              <p className="text-[11px] text-slate-500">{fmt(resumen.suma(resumen.inhabilitadas))}</p>
+            </button>
+          </div>
+
+          {grupoAbierto && (
+            <div className="mb-5 rounded-xl border border-slate-200 bg-white p-4">
+              {grupoAbierto === "GANADA" && (
+                <div className="space-y-1.5">
+                  <p className="mb-1 text-xs font-semibold uppercase text-slate-400">Cotizaciones ganadas</p>
+                  {resumen.porEstado.GANADA.length === 0 && <p className="text-xs text-slate-400">Todavía no hay cotizaciones ganadas.</p>}
+                  {resumen.porEstado.GANADA.map((q) => (
+                    <div key={q.id} className="rounded-lg bg-emerald-50/60 px-3 py-2 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <p className="font-medium text-slate-700">{q.numero}-{q.revision} · {cliente(q.clienteId)}</p>
+                          <p className="text-slate-400">{q.fecha}</p>
+                        </div>
+                        <p className="font-semibold text-emerald-700">{fmt(q.total)}</p>
+                      </div>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        <button onClick={() => volverASeguimientoDash(q.id)} disabled={soloLectura} className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500 disabled:opacity-40">¿Por error? Volver a seguimiento</button>
+                        {marcandoPerdidaDashId === q.id ? (
+                          <span className="flex items-center gap-1">
+                            <input
+                              autoFocus value={motivoPerdidaDashTexto} onChange={(e) => setMotivoPerdidaDashTexto(e.target.value)}
+                              placeholder="¿Qué pasó? (opcional)" className="w-32 rounded border border-rose-300 px-1.5 py-1 text-[10px]"
+                            />
+                            <button onClick={() => { marcarPerdidaDash(q.id, motivoPerdidaDashTexto); setMarcandoPerdidaDashId(null); setMotivoPerdidaDashTexto(""); }} className="rounded bg-rose-600 px-1.5 py-0.5 text-[10px] font-medium text-white">Confirmar</button>
+                            <button onClick={() => { setMarcandoPerdidaDashId(null); setMotivoPerdidaDashTexto(""); }} className="text-[10px] underline">Cancelar</button>
+                          </span>
+                        ) : (
+                          <button onClick={() => setMarcandoPerdidaDashId(q.id)} disabled={soloLectura} className="rounded bg-rose-50 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 disabled:opacity-40">El negocio no se concretó — marcar como perdida</button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {grupoAbierto === "INHABILITADA" && (
+                <div className="space-y-1.5">
+                  <p className="mb-1 text-xs font-semibold uppercase text-slate-400">Cotizaciones inhabilitadas (informativo — no cuentan en Ganadas/Seguimiento/Perdidas)</p>
+                  {resumen.inhabilitadas.length === 0 && <p className="text-xs text-slate-400">No hay cotizaciones inhabilitadas.</p>}
+                  {resumen.inhabilitadas.map((q) => (
+                    <div key={q.id} className="rounded-lg bg-slate-100 px-3 py-2 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <p className="font-medium text-slate-700">{q.numero}-{q.revision} · {cliente(q.clienteId)}</p>
+                          <p className="text-slate-400">{q.fecha}</p>
+                        </div>
+                        <p className="font-semibold text-slate-600">{fmt(q.total)}</p>
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-slate-400">
+                        {q.estadoAntesDeInhabilitar && <span className="rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] font-medium text-slate-600">Antes: {q.estadoAntesDeInhabilitar}</span>}
+                        {q.motivoPerdida && <span>Motivo pérdida: {q.motivoPerdida}</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {grupoAbierto === "PERDIDA" && (
+                <div className="space-y-1.5">
+                  <p className="mb-1 text-xs font-semibold uppercase text-slate-400">Cotizaciones perdidas</p>
+                  {resumen.porEstado.PERDIDA.length === 0 && <p className="text-xs text-slate-400">Todavía no hay cotizaciones perdidas.</p>}
+                  {resumen.porEstado.PERDIDA.map((q) => (
+                    <div key={q.id} className="rounded-lg bg-rose-50/60 px-3 py-2 text-xs">
+                      <div className="flex items-center justify-between">
+                        <p className="font-medium text-slate-700">{q.numero}-{q.revision} · {cliente(q.clienteId)}</p>
+                        <p className="font-semibold text-rose-700">{fmt(q.total)}</p>
+                      </div>
+                      <div className="mt-1 flex items-center justify-between gap-2">
+                        <p className="text-slate-400">{q.motivoPerdida ? `Motivo: ${q.motivoPerdida}` : "Sin motivo registrado"}</p>
+                        <button onClick={() => volverASeguimientoDash(q.id)} disabled={soloLectura} className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500 disabled:opacity-40">¿Por error? Volver a seguimiento</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {grupoAbierto === "SEGUIMIENTO" && (
+                <div className="space-y-4">
+                  {tareasPendientes.length > 0 && (
+                    <div>
+                      <p className="mb-1.5 text-xs font-semibold uppercase text-slate-400">Tareas pendientes</p>
+                      <div className="space-y-1.5">
+                        {tareasPendientes.map((t) => {
+                          const q = cotizaciones.find((c) => c.id === t.cotizacionId);
+                          const vencida = t.fecha && t.fecha < hoyISO;
+                          return (
+                            <div key={t.id} className={`rounded-lg px-3 py-2 text-xs ${vencida ? "bg-rose-50" : "bg-slate-50"}`}>
+                              <div className="flex items-center justify-between gap-2">
+                                <label className="flex flex-1 items-center gap-2">
+                                  <input type="checkbox" disabled={soloLectura} onChange={() => actualizarTareaComercial(t.id, { completada: true })} />
+                                  <span>
+                                    <span className="font-medium text-slate-700">{t.tipo}</span>
+                                    {q && <span className="text-slate-500"> · {q.numero}-{q.revision} ({cliente(q.clienteId)})</span>}
+                                    {t.nota && <span className="text-slate-400"> — {t.nota}</span>}
+                                  </span>
+                                </label>
+                                <span className={`shrink-0 font-medium ${vencida ? "text-rose-600" : "text-slate-400"}`}>{t.fecha}{rangoHoras(t) ? ` · ${rangoHoras(t)}` : ""}</span>
+                                <button onClick={() => editarTarea(t)} disabled={soloLectura} title="Reprogramar" className="shrink-0 rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-700 disabled:opacity-40"><Pencil size={13} /></button>
+                                <button onClick={() => setConfirmandoEliminarTarea(t.id)} disabled={soloLectura} title="Eliminar (se canceló)" className="shrink-0 rounded p-1 text-slate-400 hover:bg-rose-100 hover:text-rose-600 disabled:opacity-40"><Trash2 size={13} /></button>
+                              </div>
+                              {confirmandoEliminarTarea === t.id && (
+                                <div className="mt-1.5 flex items-center gap-2 rounded bg-rose-100 px-2 py-1 text-[11px]">
+                                  <span className="font-medium text-rose-700">¿Eliminar esta tarea? (se canceló)</span>
+                                  <button onClick={() => eliminarTareaConfirmada(t.id)} className="rounded bg-rose-600 px-1.5 py-0.5 font-medium text-white">Sí</button>
+                                  <button onClick={() => setConfirmandoEliminarTarea(null)} className="underline">No</button>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <p className="mb-1.5 text-xs font-semibold uppercase text-slate-400">Cotizaciones en seguimiento (Borrador + Enviada)</p>
+                    {resumen.seguimiento.length === 0 && <p className="text-xs text-slate-400">No hay cotizaciones en borrador o enviadas por ahora.</p>}
+                    <div className="space-y-2">
+                      {resumen.seguimiento.map((q) => {
+                        const tareasQ = tareasDeCotizacion(q.id).filter((t) => !t.completada);
+                        return (
+                          <div key={q.id} className="rounded-lg border border-slate-100 px-3 py-2 text-xs">
+                            <div className="flex items-center justify-between gap-2">
+                              <div>
+                                <p className="font-medium text-slate-700">
+                                  {q.numero}-{q.revision} · {cliente(q.clienteId)}
+                                  <span className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${q.estado === "ENVIADA" ? "bg-blue-100 text-blue-700" : "bg-slate-100 text-slate-500"}`}>
+                                    {q.estado === "ENVIADA" ? "Enviada" : "Borrador"}
+                                  </span>
+                                </p>
+                                <p className="text-slate-400">{q.fecha} · {fmt(q.total)}</p>
+                              </div>
+                              <button
+                                onClick={() => setTareaEnCreacion({ cotizacionId: q.id, tipo: "Llamar", fecha: hoyISO, horaInicio: "", horaFin: "", nota: "" })}
+                                disabled={soloLectura}
+                                className="flex shrink-0 items-center gap-1 rounded border border-blue-300 bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-40"
+                              >
+                                <Plus size={12} /> Tarea
+                              </button>
+                            </div>
+                            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                              <button onClick={() => marcarGanadaDash(q.id)} disabled={soloLectura} className="rounded bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 disabled:opacity-40">Marcar como ganada</button>
+                              {marcandoPerdidaDashId === q.id ? (
+                                <span className="flex items-center gap-1">
+                                  <input
+                                    autoFocus value={motivoPerdidaDashTexto} onChange={(e) => setMotivoPerdidaDashTexto(e.target.value)}
+                                    placeholder="Motivo (opcional)" className="w-28 rounded border border-rose-300 px-1.5 py-1 text-[11px]"
+                                  />
+                                  <button onClick={() => { marcarPerdidaDash(q.id, motivoPerdidaDashTexto); setMarcandoPerdidaDashId(null); setMotivoPerdidaDashTexto(""); }} className="rounded bg-rose-600 px-1.5 py-1 text-[11px] font-medium text-white">Confirmar</button>
+                                  <button onClick={() => { setMarcandoPerdidaDashId(null); setMotivoPerdidaDashTexto(""); }} className="text-[11px] underline">Cancelar</button>
+                                </span>
+                              ) : (
+                                <button onClick={() => setMarcandoPerdidaDashId(q.id)} disabled={soloLectura} className="rounded bg-rose-50 px-2 py-1 text-[11px] font-medium text-rose-700 disabled:opacity-40">Marcar como perdida</button>
+                              )}
+                            </div>
+                            {tareasQ.length > 0 && (
+                              <div className="mt-1.5 flex flex-wrap gap-1">
+                                {tareasQ.map((t) => (
+                                  <span key={t.id} className="flex items-center gap-1 rounded-full bg-amber-50 py-0.5 pl-2 pr-1 text-[10px] font-medium text-amber-700">
+                                    {t.tipo} · {t.fecha}{rangoHoras(t) ? ` ${rangoHoras(t)}` : ""}
+                                    <button onClick={() => editarTarea(t)} disabled={soloLectura} title="Reprogramar" className="rounded p-0.5 text-amber-600 hover:bg-amber-200 disabled:opacity-40"><Pencil size={10} /></button>
+                                    <button onClick={() => setConfirmandoEliminarTarea(t.id)} disabled={soloLectura} title="Eliminar (se canceló)" className="rounded p-0.5 text-amber-600 hover:bg-rose-200 hover:text-rose-700 disabled:opacity-40"><Trash2 size={10} /></button>
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            {tareasQ.some((t) => confirmandoEliminarTarea === t.id) && (
+                              <div className="mt-1.5 flex items-center gap-2 rounded bg-rose-100 px-2 py-1 text-[11px]">
+                                <span className="font-medium text-rose-700">¿Eliminar esta tarea? (se canceló)</span>
+                                <button onClick={() => eliminarTareaConfirmada(confirmandoEliminarTarea)} className="rounded bg-rose-600 px-1.5 py-0.5 font-medium text-white">Sí</button>
+                                <button onClick={() => setConfirmandoEliminarTarea(null)} className="underline">No</button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Tacómetros: Ganadas/Seguimiento/Perdidas muestran su parte del
+              total de cotizaciones vigentes; General es el avance de la
+              meta mensual (mismo tacómetro grande de más abajo, en chico);
+              Inhabilitadas es solo informativo — no participa del embudo
+              (por eso va aparte, en gris, con su propio % sobre el total
+              de cotizaciones + inhabilitadas). */}
+          <div className="mb-5 grid grid-cols-2 gap-2 sm:grid-cols-5">
+            <div className="rounded-xl border border-emerald-200 bg-white p-2">
+              <p className="text-center text-[11px] font-medium text-emerald-700">Ganadas</p>
+              <GaugeMedidor pct={resumen.totalVigentes ? Math.round((resumen.porEstado.GANADA.length / resumen.totalVigentes) * 100) : 0} />
+              <p className="text-center text-xs font-semibold text-emerald-800">{fmt(resumen.suma(resumen.porEstado.GANADA))}</p>
+            </div>
+            <div className="rounded-xl border border-blue-200 bg-white p-2">
+              <p className="text-center text-[11px] font-medium text-blue-700">Seguimiento</p>
+              <GaugeMedidor pct={resumen.totalVigentes ? Math.round((resumen.seguimiento.length / resumen.totalVigentes) * 100) : 0} />
+              <p className="text-center text-xs font-semibold text-blue-800">{fmt(resumen.suma(resumen.seguimiento))}</p>
+            </div>
+            <div className="rounded-xl border border-rose-200 bg-white p-2">
+              <p className="text-center text-[11px] font-medium text-rose-700">Perdidas</p>
+              <GaugeMedidor pct={resumen.totalVigentes ? Math.round((resumen.porEstado.PERDIDA.length / resumen.totalVigentes) * 100) : 0} />
+              <p className="text-center text-xs font-semibold text-rose-800">{fmt(resumen.suma(resumen.porEstado.PERDIDA))}</p>
+            </div>
+            <div className="rounded-xl border border-amber-200 bg-white p-2">
+              <p className="text-center text-[11px] font-medium text-amber-700">General (meta del mes)</p>
+              <GaugeMedidor pct={pctMeta ?? 0} />
+              <p className="text-center text-xs font-semibold text-amber-800">{fmt(resumen.totalGanadoMes)}{metaVentas > 0 ? ` / ${fmt(metaVentas)}` : ""}</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white p-2" title="Solo informativo — las inhabilitadas no cuentan en Ganadas/Seguimiento/Perdidas">
+              <p className="text-center text-[11px] font-medium text-slate-500">Inhabilitadas <span className="italic">(informativo)</span></p>
+              <GaugeMedidor pct={resumen.totalConInhabilitadas ? Math.round((resumen.inhabilitadas.length / resumen.totalConInhabilitadas) * 100) : 0} />
+              <p className="text-center text-xs font-semibold text-slate-600">{resumen.inhabilitadas.length} cotización{resumen.inhabilitadas.length !== 1 ? "es" : ""} · {fmt(resumen.suma(resumen.inhabilitadas))}</p>
+            </div>
+          </div>
+
+          <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="rounded-xl border border-slate-200 bg-white p-4">
+              <p className="text-xs font-medium text-slate-500">Tasa de conversión (ganadas / cerradas)</p>
+              <p className="mt-1 text-2xl font-semibold text-slate-800">
+                {resumen.tasaConversion === null ? "—" : `${resumen.tasaConversion.toFixed(0)}%`}
+              </p>
+              <p className="text-[11px] text-slate-400">
+                {resumen.cerradas === 0 ? "Aún no hay cotizaciones cerradas (ganadas o perdidas)." : `Sobre ${resumen.cerradas} cotizaciones cerradas.`}
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-4">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-xs font-medium text-amber-700">Meta del mes ({resumen.mesActual})</p>
+                <div className="flex items-center gap-1">
+                  <span className="text-xs text-slate-400">Meta: $</span>
+                  <input
+                    type="number" value={metaVentas || ""} disabled={soloLectura}
+                    onChange={(e) => setMetaVentas(Number(e.target.value) || 0)}
+                    placeholder="0" className="w-28 rounded-lg border border-slate-300 px-2 py-1 text-xs disabled:opacity-60"
+                  />
+                </div>
+              </div>
+              {metaVentas > 0 ? (
+                <>
+                  <GaugeMedidor pct={pctMeta} />
+                  <p className="-mt-1 text-center text-sm font-semibold text-amber-800">{fmt(resumen.totalGanadoMes)} <span className="font-normal text-amber-600">de {fmt(metaVentas)}</span></p>
+                  {pctMeta >= 100 && <p className="mt-1 text-center text-[11px] font-medium text-emerald-700">¡Meta cumplida este mes! 🎉</p>}
+                </>
+              ) : (
+                <p className="text-[11px] text-amber-600">Define una meta mensual arriba para ver el avance aquí.</p>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <p className="mb-3 text-xs font-medium text-slate-500">Ventas ganadas por mes (últimos 6 meses) — con línea de tendencia</p>
+            {(() => {
+              const n = resumen.meses.length;
+              const maxValor = Math.max(...resumen.meses.map((m) => m.valor), 1);
+              // Línea de tendencia = regresión lineal simple (mínimos
+              // cuadrados) sobre los 6 valores mensuales — una recta que
+              // resume si el negocio está subiendo o bajando mes a mes,
+              // superpuesta a las barras.
+              const xs = resumen.meses.map((_, i) => i);
+              const ys = resumen.meses.map((m) => m.valor);
+              const xMedia = xs.reduce((s, x) => s + x, 0) / n;
+              const yMedia = ys.reduce((s, y) => s + y, 0) / n;
+              const denom = xs.reduce((s, x) => s + (x - xMedia) ** 2, 0) || 1;
+              const pendiente = xs.reduce((s, x, i) => s + (x - xMedia) * (ys[i] - yMedia), 0) / denom;
+              const intercepto = yMedia - pendiente * xMedia;
+              const tendenciaSube = pendiente > 0;
+
+              const anchoSvg = 360, altoSvg = 150, margenAbajo = 20, margenArriba = 16;
+              const altoBarras = altoSvg - margenAbajo - margenArriba;
+              const anchoSlot = anchoSvg / n;
+              const yDeValor = (v) => margenArriba + altoBarras - (Math.max(0, v) / maxValor) * altoBarras;
+              const puntosTendencia = xs.map((x) => `${x * anchoSlot + anchoSlot / 2},${yDeValor(pendiente * x + intercepto)}`).join(" ");
+
+              return (
+                <div>
+                  <svg viewBox={`0 0 ${anchoSvg} ${altoSvg}`} className="w-full" style={{ height: "170px" }}>
+                    {resumen.meses.map((m, i) => {
+                      const alto = altoBarras - (yDeValor(m.valor) - margenArriba);
+                      const anchoBarra = anchoSlot * 0.55;
+                      const x = i * anchoSlot + (anchoSlot - anchoBarra) / 2;
+                      return (
+                        <g key={m.clave}>
+                          {m.valor > 0 && (
+                            <text x={i * anchoSlot + anchoSlot / 2} y={yDeValor(m.valor) - 5} textAnchor="middle" fontSize="9" fontWeight="600" fill="#64748b">{fmt(m.valor)}</text>
+                          )}
+                          <rect x={x} y={yDeValor(m.valor)} width={anchoBarra} height={Math.max(2, alto)} rx="2" fill={m.clave === resumen.mesActual ? "#f59e0b" : "#cbd5e1"} />
+                          <text x={i * anchoSlot + anchoSlot / 2} y={altoSvg - 4} textAnchor="middle" fontSize="9" fill="#64748b" style={{ textTransform: "capitalize" }}>{m.nombre}</text>
+                        </g>
+                      );
+                    })}
+                    <polyline points={puntosTendencia} fill="none" stroke="#0369a1" strokeWidth="1.75" strokeDasharray="4 3" />
+                    {xs.map((x) => (
+                      <circle key={x} cx={x * anchoSlot + anchoSlot / 2} cy={yDeValor(pendiente * x + intercepto)} r="2.5" fill="#0369a1" />
+                    ))}
+                  </svg>
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    Tendencia {tendenciaSube ? "al alza" : "a la baja"}: en promedio {tendenciaSube ? "+" : ""}{fmt(pendiente)} por mes.
+                  </p>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {pestana === "cotizaciones" && <VistaCotizaciones {...props} />}
+      {pestana === "terceros" && <VistaTerceros {...props} soloClientes />}
+
+      {tareaEnCreacion && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="w-full max-w-sm rounded-xl bg-white p-5">
+            <div className="mb-4 flex items-center justify-between">
+              <p className="text-sm font-semibold">{tareaEnCreacion.id ? "Reprogramar tarea" : "Nueva tarea de seguimiento"}</p>
+              <button onClick={() => setTareaEnCreacion(null)}><X size={18} /></button>
+            </div>
+            {tareaEnCreacion.id && (
+              <p className="mb-3 -mt-2 text-[11px] text-slate-400">{tareaEnCreacion.eventoCalendarioId ? "Esto también actualiza el evento ya creado en el Calendario de Outlook." : "Esta tarea no tiene un evento sincronizado en Outlook (se creó sin conexión a Microsoft), así que el cambio queda solo acá."}</p>
+            )}
+            <div className="space-y-3">
+              <div>
+                <label className={labelCls}>Tipo</label>
+                <select className={inputCls} value={tareaEnCreacion.tipo} onChange={(e) => setTareaEnCreacion((f) => ({ ...f, tipo: e.target.value }))}>
+                  {TIPOS_TAREA_COMERCIAL.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className={labelCls}>Fecha</label>
+                <input type="date" className={inputCls} value={tareaEnCreacion.fecha} onChange={(e) => setTareaEnCreacion((f) => ({ ...f, fecha: e.target.value }))} />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className={labelCls}>Desde (opcional)</label>
+                  <input type="time" className={inputCls} value={tareaEnCreacion.horaInicio || ""} onChange={(e) => setTareaEnCreacion((f) => ({ ...f, horaInicio: e.target.value }))} />
+                </div>
+                <div>
+                  <label className={labelCls}>Hasta (opcional)</label>
+                  <input type="time" className={inputCls} value={tareaEnCreacion.horaFin || ""} onChange={(e) => setTareaEnCreacion((f) => ({ ...f, horaFin: e.target.value }))} />
+                </div>
+              </div>
+              <div>
+                <label className={labelCls}>Nota (opcional)</label>
+                <input className={inputCls} placeholder="Ej. Preguntar por presupuesto aprobado…" value={tareaEnCreacion.nota} onChange={(e) => setTareaEnCreacion((f) => ({ ...f, nota: e.target.value }))} />
+              </div>
+              <button onClick={guardarTareaNueva} disabled={soloLectura} className="w-full rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-40">
+                {tareaEnCreacion.id ? "Guardar cambios" : "Agregar tarea"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Medidor tipo tacómetro (semicírculo) para el avance de la meta mensual —
+// más visual que una barra de progreso lineal: rojo por debajo del 60%,
+// ámbar entre 60% y 99%, verde al llegar o pasar el 100%.
+function GaugeMedidor({ pct }) {
+  const p = Math.max(0, Math.min(100, pct ?? 0));
+  const radio = 80;
+  const cx = 100;
+  const cy = 95;
+  const circunferencia = Math.PI * radio;
+  const offset = circunferencia * (1 - p / 100);
+  const color = p >= 100 ? "#059669" : p >= 60 ? "#d97706" : "#dc2626";
+  const arco = `M ${cx - radio},${cy} A ${radio},${radio} 0 0 1 ${cx + radio},${cy}`;
+  return (
+    <div className="flex justify-center">
+      <svg viewBox="0 0 200 112" className="w-full max-w-[240px]">
+        <path d={arco} fill="none" stroke="#fde68a" strokeWidth="14" strokeLinecap="round" />
+        <path
+          d={arco}
+          fill="none"
+          stroke={color}
+          strokeWidth="14"
+          strokeLinecap="round"
+          strokeDasharray={circunferencia}
+          strokeDashoffset={offset}
+          style={{ transition: "stroke-dashoffset 0.6s ease, stroke 0.6s ease" }}
+        />
+        <text x={cx} y={cy - 6} textAnchor="middle" fill="#78350f" style={{ fontSize: "30px", fontWeight: 700 }}>{p}%</text>
+        <text x={cx - radio} y={cy + 16} textAnchor="start" fill="#94a3b8" style={{ fontSize: "10px" }}>0%</text>
+        <text x={cx + radio} y={cy + 16} textAnchor="end" fill="#94a3b8" style={{ fontSize: "10px" }}>100%</text>
+      </svg>
+    </div>
+  );
+}
+
+function VistaCotizaciones({ cotizaciones, crearCotizacionEnBD, actualizarCotizacionEnBD, eliminarCotizacionEnBD, proyectos, crearProyecto, cliente, clientes, crearCliente, operaciones, soloLectura, nit, onGuardada, onItemCatalogoCreado, onPdfGenerado, onEstadoCotizacionActualizado, onCancelarProyecto }) {
   const [vista, setVista] = useState("lista"); // lista | formulario | pdf
   const [enEdicion, setEnEdicion] = useState(null);
   const [motivoVersion, setMotivoVersion] = useState("");
@@ -2864,9 +4046,37 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
   const [previa, setPrevia] = useState(false);
   const [modoEdicion, setModoEdicion] = useState("NUEVA"); // NUEVA | EDITAR_BORRADOR | NUEVA_VERSION
   const [confirmandoEliminarId, setConfirmandoEliminarId] = useState(null);
+  const [confirmandoEliminarGrave, setConfirmandoEliminarGrave] = useState(null); // { id, numeroCompleto } — para Enviada/Reemplazada
+  const [marcandoPerdidaId, setMarcandoPerdidaId] = useState(null);
+  const [motivoPerdidaTexto, setMotivoPerdidaTexto] = useState("");
+  const [estadoGuardado, setEstadoGuardado] = useState("inactivo"); // inactivo | guardando | listo | error
+  const [errorGuardado, setErrorGuardado] = useState(null);
   const [editandoItemCatalogo, setEditandoItemCatalogo] = useState(null); // ítem del catálogo en edición
   const [confirmandoEliminarItem, setConfirmandoEliminarItem] = useState(null); // id de ítem del catálogo a eliminar
   const [nuevoItemCatalogo, setNuevoItemCatalogo] = useState(null); // { descripcion, unidad, precio } — nuevo desde la vista de catálogo
+  const pdfContenedorRef = useRef(null); // nodo del DOM de la plantilla del PDF en pantalla — lo usan tanto la descarga manual como la subida a OneDrive
+  const [descargandoPdf, setDescargandoPdf] = useState(false);
+
+  async function descargarPdf() {
+    if (!pdfContenedorRef.current || !cotizacionPdf) return;
+    setDescargandoPdf(true);
+    try {
+      const blob = await generarPdfDesdeElemento(pdfContenedorRef.current);
+      const url = URL.createObjectURL(blob);
+      const enlace = document.createElement("a");
+      enlace.href = url;
+      enlace.download = `Cotizacion_${cotizacionPdf.numero}-${cotizacionPdf.revision}.pdf`;
+      document.body.appendChild(enlace);
+      enlace.click();
+      document.body.removeChild(enlace);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("[PDF] No se pudo generar el PDF para descargar:", error);
+      alert("No se pudo generar el PDF: " + (error?.message || String(error)));
+    } finally {
+      setDescargandoPdf(false);
+    }
+  }
 
   // Control de facturación: para cada cotización GANADA, busca su proyecto
   // vinculado y suma las ventas (facturas) que se le hayan asignado, para
@@ -2890,9 +4100,15 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
   // Catálogo de ítems reutilizables — se va enriqueciendo con lo que se
   // agregue desde el formulario, para no volver a escribir descripción,
   // unidad y precio de algo que ya se cotizó antes.
-  const [catalogoItems, setCatalogoItems] = useState([]);
+  const {
+    registros: catalogoItems,
+    crear: crearItemCatalogoEnBD,
+    actualizar: actualizarItemCatalogoEnBD,
+    eliminar: eliminarItemCatalogoEnBD,
+  } = useColeccionSupabase("catalogo_items");
   function exportarCotizacionesExcel() {
-    const filas = cotizaciones.filter((q) => q.estado !== "REEMPLAZADA").map((q) => ({
+    const vigentes = cotizaciones.filter((q) => q.estado !== "REEMPLAZADA");
+    const filas = vigentes.map((q) => ({
       "N.°": `${q.numero}-${q.revision}`, Fecha: q.fecha, Cliente: cliente(q.clienteId), Referencia: q.referencia,
       Estado: q.estado, "Válida hasta": q.validaHasta, Subtotal: q.subtotalBruto ?? q.subtotal, Descuento: q.descuentoValor || 0,
       IVA: q.iva, Total: q.total, "Condiciones de pago": q.condiciones,
@@ -2901,19 +4117,39 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
     ws["!cols"] = [{ wch: 14 }, { wch: 12 }, { wch: 26 }, { wch: 32 }, { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 28 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Cotizaciones");
+
+    // Detalle ítem por ítem de cada cotización — la misma información que
+    // se sincroniza a OneDrive, para que este archivo local también quede
+    // completo, no solo con el resumen.
+    const filasItems = [];
+    vigentes.forEach((q) => {
+      (q.items || []).forEach((it) => {
+        const cantidad = Number(it.cantidad) || 0;
+        const precio = Number(it.precio) || 0;
+        filasItems.push({
+          "N.° cotización": `${q.numero}-${q.revision}`, Fecha: q.fecha, Cliente: cliente(q.clienteId),
+          Ítem: it.descripcion || "", Unidad: it.unidad || "", Cantidad: cantidad, "Precio unitario": precio, "Valor total": cantidad * precio,
+        });
+      });
+    });
+    const wsItems = XLSX.utils.json_to_sheet(filasItems);
+    wsItems["!cols"] = [{ wch: 14 }, { wch: 12 }, { wch: 26 }, { wch: 40 }, { wch: 10 }, { wch: 10 }, { wch: 14 }, { wch: 14 }];
+    XLSX.utils.book_append_sheet(wb, wsItems, "Items");
+
     XLSX.writeFile(wb, `Cotizaciones_${hoy()}.xlsx`);
   }
 
   function crearItemCatalogo(datos) {
     const nuevo = { id: `ci${Date.now()}`, ...datos };
-    setCatalogoItems((cs) => [...cs, nuevo]);
+    crearItemCatalogoEnBD(nuevo);
+    onItemCatalogoCreado?.(nuevo);
     return nuevo.id;
   }
   function actualizarItemCatalogo(id, cambios) {
-    setCatalogoItems((cs) => cs.map((ci) => (ci.id === id ? { ...ci, ...cambios } : ci)));
+    actualizarItemCatalogoEnBD(id, cambios);
   }
   function eliminarItemCatalogo(id) {
-    setCatalogoItems((cs) => cs.filter((ci) => ci.id !== id));
+    eliminarItemCatalogoEnBD(id);
     setConfirmandoEliminarItem(null);
   }
   function exportarCatalogoExcel() {
@@ -2962,21 +4198,67 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
     return { subtotalBruto, descuentoValor, subtotal, iva, total, costoDirecto, administracion, imprevistos, utilidad, aiu, retencionFuente, retencionIca, netoEstimado: total - retencionFuente - retencionIca };
   }
 
+  // Para poder avisarle a Graph/Excel CUÁL cotización cambió de estado
+  // (Excel identifica las filas por "numero-revision", no por el id de
+  // Supabase).
+  function numeroCompletoDe(id) {
+    const q = cotizaciones.find((x) => x.id === id);
+    return q ? `${q.numero}-${q.revision}` : null;
+  }
+
   function marcarGanada(id) {
-    setCotizaciones((qs) => qs.map((q) => (q.id === id ? { ...q, estado: "GANADA" } : q)));
+    actualizarCotizacionEnBD(id, { estado: "GANADA" });
     crearProyecto(id); // toda cotización ganada queda disponible para costear de una vez
+    onEstadoCotizacionActualizado?.(numeroCompletoDe(id), { estado: "GANADA" });
+  }
+
+  function marcarPerdida(id, motivo) {
+    actualizarCotizacionEnBD(id, { estado: "PERDIDA", motivoPerdida: motivo || null });
+    onCancelarProyecto?.(id); // no-op si la cotización no tenía proyecto (ej. venía de Enviada, no de Ganada)
+    onEstadoCotizacionActualizado?.(numeroCompletoDe(id), { estado: "PERDIDA", motivoPerdida: motivo || null });
+  }
+
+  // El consecutivo sale del número más alto que YA EXISTE entre TODAS las
+  // cotizaciones (sin importar su estado) — no de cuántas hay en total.
+  // Así nunca se repite un número aunque se hayan inhabilitado o borrado
+  // cotizaciones de por medio (con un conteo simple, bajar el total podía
+  // hacer que el siguiente número nuevo chocara con uno que ya existe).
+  function siguienteConsecutivo() {
+    const maxConsecutivoExistente = cotizaciones.reduce((max, q) => {
+      const coincide = /^C1-(\d+)$/.exec(q.numero || "");
+      return coincide ? Math.max(max, Number(coincide[1])) : max;
+    }, 1080);
+    return maxConsecutivoExistente + 1;
   }
 
   function nuevaCotizacion() {
-    const consecutivo = 1080 + cotizaciones.length + 1;
     setModoEdicion("NUEVA");
     setEnEdicion({
-      numero: `C1-${consecutivo}`, revision: 1,
+      numero: `C1-${siguienteConsecutivo()}`, revision: 1,
       clienteId: "", atencion: "", direccion: "", ciudad: "", email: "", telefono: "",
       referencia: "", fecha: hoy(), validaHasta: "", elaboradaPor: "", condiciones: "Contado comercial",
       items: [{ item: 1, cantidad: 1, unidad: "UND", descripcion: "", precio: 0 }],
       observaciones: "",
       tipoCotizacion: "ESTANDAR", administracionPct: 10, imprevistosPct: 5, utilidadPct: 5, ivaSobre: "TODO",
+    });
+    setMotivoVersion("");
+    setPrevia(false);
+    setVista("formulario");
+  }
+
+  // Copia todos los datos de una cotización existente (cliente, ítems,
+  // condiciones, etc.) a una cotización NUEVA e independiente — número y
+  // revisión 1 propios, fecha de hoy — para no tener que volver a
+  // digitar todo cuando se cotiza algo muy parecido a algo ya hecho.
+  function copiarCotizacion(q) {
+    setModoEdicion("NUEVA");
+    setEnEdicion({
+      numero: `C1-${siguienteConsecutivo()}`, revision: 1,
+      clienteId: q.clienteId, atencion: q.atencion, direccion: q.direccion, ciudad: q.ciudad, email: q.email, telefono: q.telefono,
+      referencia: q.referencia, fecha: hoy(), validaHasta: "", elaboradaPor: q.elaboradaPor, condiciones: q.condiciones,
+      items: q.items.map((it, i) => ({ ...it, item: i + 1 })),
+      observaciones: q.observaciones,
+      tipoCotizacion: q.tipoCotizacion, administracionPct: q.administracionPct, imprevistosPct: q.imprevistosPct, utilidadPct: q.utilidadPct, ivaSobre: q.ivaSobre,
     });
     setMotivoVersion("");
     setPrevia(false);
@@ -3000,11 +4282,13 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
   }
 
   function volverABorrador(id) {
-    setCotizaciones((qs) => qs.map((q) => (q.id === id ? { ...q, estado: "BORRADOR" } : q)));
+    actualizarCotizacionEnBD(id, { estado: "BORRADOR" });
+    onEstadoCotizacionActualizado?.(numeroCompletoDe(id), { estado: "BORRADOR" });
   }
 
   function marcarEnviada(id) {
-    setCotizaciones((qs) => qs.map((q) => (q.id === id ? { ...q, estado: "ENVIADA" } : q)));
+    actualizarCotizacionEnBD(id, { estado: "ENVIADA" });
+    onEstadoCotizacionActualizado?.(numeroCompletoDe(id), { estado: "ENVIADA" });
   }
 
   function actualizarItem(idx, campo, valor) {
@@ -3021,6 +4305,16 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
   function quitarItem(idx) {
     setEnEdicion((f) => ({ ...f, items: f.items.filter((_, i) => i !== idx) }));
   }
+  // Duplica un ítem ya cargado justo debajo del original, para poder
+  // editar la copia (cambiar cantidad, descripción, etc.) en vez de
+  // digitar todo de nuevo cuando varios ítems son muy parecidos.
+  function duplicarItem(idx) {
+    setEnEdicion((f) => {
+      const items = [...f.items];
+      items.splice(idx + 1, 0, { ...items[idx] });
+      return { ...f, items: items.map((it, i) => ({ ...it, item: i + 1 })) };
+    });
+  }
 
   function agregarObservacionFrecuente(texto) {
     if (!texto) return;
@@ -3036,25 +4330,66 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
     agregarObservacionFrecuente(texto);
   }
 
-  function guardarCotizacion() {
-    if (!enEdicion.clienteId || !enEdicion.referencia) return;
-    if (modoEdicion === "NUEVA_VERSION" && !motivoVersion) return;
+  // finalizarEnviada: true cuando se usa el botón "Finalizada — enviar al
+  // cliente" en vez de "Guardar borrador" — solo aplica a modoEdicion NUEVA
+  // y EDITAR_BORRADOR (una cotización que ya es NUEVA_VERSION siempre se
+  // guarda como Enviada, como antes).
+  async function guardarCotizacion(finalizarEnviada = false) {
+    if (!enEdicion.clienteId || !enEdicion.referencia) {
+      setEstadoGuardado("error");
+      setErrorGuardado("Falta elegir el Cliente y/o escribir la Referencia — ambos son obligatorios para guardar.");
+      return;
+    }
+    if (modoEdicion === "NUEVA_VERSION" && !motivoVersion) {
+      setEstadoGuardado("error");
+      setErrorGuardado("Falta escribir el motivo de la nueva versión — es obligatorio para guardar.");
+      return;
+    }
     const totales = calcularTotales(enEdicion);
 
-    if (modoEdicion === "NUEVA") {
-      const nueva = { ...enEdicion, ...totales, id: `q${Date.now()}`, estado: "BORRADOR", motivoVersion: null };
-      setCotizaciones((qs) => [nueva, ...qs]);
-    } else if (modoEdicion === "EDITAR_BORRADOR") {
-      const actualizada = { ...enEdicion, ...totales };
-      setCotizaciones((qs) => qs.map((q) => (q.id === actualizada.id ? actualizada : q)));
-    } else {
-      // Nueva versión: la anterior se conserva en el historial marcada como
-      // REEMPLAZADA (no se borra) — así "ver versiones anteriores" sí tiene
-      // qué mostrar, en vez de perder el rastro de lo que se envió antes.
-      const nueva = { ...enEdicion, ...totales, id: `q${Date.now()}`, estado: "ENVIADA", motivoVersion };
-      setCotizaciones((qs) => [nueva, ...qs.map((q) => (q.id === enEdicion.id ? { ...q, estado: "REEMPLAZADA" } : q))]);
+    setEstadoGuardado("guardando");
+    setErrorGuardado(null);
+    let ok = false;
+
+    try {
+      if (modoEdicion === "NUEVA") {
+        const nueva = { ...enEdicion, ...totales, id: `q${Date.now()}`, estado: finalizarEnviada ? "ENVIADA" : "BORRADOR", motivoVersion: null };
+        ok = await crearCotizacionEnBD(nueva);
+        if (ok) onGuardada?.({ ...nueva, clienteNombre: cliente(nueva.clienteId) });
+      } else if (modoEdicion === "EDITAR_BORRADOR") {
+        const actualizada = { ...enEdicion, ...totales, estado: finalizarEnviada ? "ENVIADA" : "BORRADOR" };
+        ok = await actualizarCotizacionEnBD(actualizada.id, actualizada);
+        // Si se finaliza y envía desde acá, la fila que ya existe en Excel
+        // (creada como Borrador) hay que actualizarla a Enviada — a
+        // diferencia de una cotización NUEVA, que recién se está creando y
+        // ya sale con el estado correcto desde el principio.
+        if (ok && finalizarEnviada) {
+          onEstadoCotizacionActualizado?.(`${actualizada.numero}-${actualizada.revision}`, { estado: "ENVIADA" });
+        }
+      } else {
+        // Nueva versión: la anterior se conserva en el historial marcada como
+        // REEMPLAZADA (no se borra) — así "ver versiones anteriores" sí tiene
+        // qué mostrar, en vez de perder el rastro de lo que se envió antes.
+        const nueva = { ...enEdicion, ...totales, id: `q${Date.now()}`, estado: "ENVIADA", motivoVersion };
+        ok = await crearCotizacionEnBD(nueva);
+        if (ok) {
+          await actualizarCotizacionEnBD(enEdicion.id, { estado: "REEMPLAZADA" });
+          onEstadoCotizacionActualizado?.(`${enEdicion.numero}-${enEdicion.revision}`, { estado: "REEMPLAZADA" });
+          onGuardada?.({ ...nueva, clienteNombre: cliente(nueva.clienteId) });
+        }
+      }
+    } catch (error) {
+      ok = false;
+      setErrorGuardado(error?.message || String(error));
     }
-    setVista("lista");
+
+    if (ok) {
+      setEstadoGuardado("listo");
+      setTimeout(() => setVista("lista"), 700); // breve pausa para que la confirmación sea visible antes de navegar
+    } else {
+      setEstadoGuardado("error");
+      if (!errorGuardado) setErrorGuardado("Supabase no confirmó el guardado — revisa tu conexión e inténtalo de nuevo. Los datos del formulario siguen aquí, no se perdieron.");
+    }
   }
 
   const inputCls = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-600";
@@ -3078,11 +4413,29 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
           <p className="mb-4 text-[11px] text-slate-400">El Excel es un respaldo de datos para uso interno (sin el formato a color) — para enviar al cliente, usa el PDF de cada cotización, que sí trae el membrete y los colores completos.</p>
 
           <div className="space-y-2">
-            {cotizaciones.filter((q) => q.estado !== "REEMPLAZADA").map((q) => {
+            {(() => {
+              // Una tarjeta principal por número de cotización: la versión
+              // de mayor revisión que SIGA EXISTIENDO, sin importar su
+              // estado. En el caso normal esa es la última (no
+              // REEMPLAZADA); pero si esa última versión se elimina, la
+              // tarjeta no debe desaparecer junto con todo su historial —
+              // la siguiente versión que quede (aunque haya sido
+              // REEMPLAZADA en su momento) pasa a ser la principal, y las
+              // demás se siguen viendo y pudiendo borrar en "Ver versiones
+              // anteriores", una por una.
+              const numerosVistos = new Set();
+              return [...cotizaciones]
+                .sort((a, b) => b.revision - a.revision)
+                .filter((q) => {
+                  if (numerosVistos.has(q.numero)) return false;
+                  numerosVistos.add(q.numero);
+                  return true;
+                });
+            })().map((q) => {
               const numeroCompleto = `${q.numero}-${q.revision}`;
               const versionesAnteriores = cotizaciones.filter((v) => v.numero === q.numero && v.id !== q.id).sort((a, b) => b.revision - a.revision);
               return (
-                <div key={q.id} className="rounded-xl border border-slate-200 bg-white p-4">
+                <div key={q.id} className={`rounded-xl border p-4 ${q.estado === "INHABILITADA" ? "border-slate-200 bg-slate-50/70 opacity-70" : "border-slate-200 bg-white"}`}>
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="font-medium text-slate-900">{numeroCompleto} · {cliente(q.clienteId)}</p>
@@ -3113,6 +4466,7 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     <button onClick={() => { setCotizacionPdf(q); setVista("pdf"); }} className="flex items-center gap-1 rounded bg-green-50 px-2 py-1 text-[11px] font-medium text-green-700"><FileDown size={12} /> Ver / descargar PDF</button>
+                    <button onClick={() => copiarCotizacion(q)} disabled={soloLectura} title="Crea una cotización nueva con los mismos datos, para no volver a digitar todo" className="flex items-center gap-1 rounded bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-200 disabled:opacity-40"><Copy size={12} /> Copiar para nueva</button>
 
                     {q.estado === "BORRADOR" && (
                       <>
@@ -3123,7 +4477,7 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
                         ) : (
                           <span className="flex items-center gap-1.5 rounded bg-rose-50 px-2 py-1 text-[11px]">
                             <span className="font-medium text-rose-700">¿Seguro?</span>
-                            <button onClick={() => { setCotizaciones((qs) => qs.filter((x) => x.id !== q.id)); setConfirmandoEliminarId(null); }} disabled={soloLectura} className="rounded bg-rose-600 px-1.5 py-0.5 font-medium text-white disabled:opacity-40">Sí</button>
+                            <button onClick={() => { eliminarCotizacionEnBD(q.id); onEstadoCotizacionActualizado?.(`${q.numero}-${q.revision}`, { estado: "INHABILITADA" }); setConfirmandoEliminarId(null); }} disabled={soloLectura} className="rounded bg-rose-600 px-1.5 py-0.5 font-medium text-white disabled:opacity-40">Sí</button>
                             <button onClick={() => setConfirmandoEliminarId(null)} className="underline">No</button>
                           </span>
                         )}
@@ -3134,12 +4488,64 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
                       <>
                         <button onClick={() => marcarGanada(q.id)} disabled={soloLectura} className="rounded bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 disabled:opacity-40">Marcar como ganada</button>
                         <button onClick={() => nuevaVersion(q)} disabled={soloLectura} className="flex items-center gap-1 rounded bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-700 disabled:opacity-40"><ArrowRight size={12} /> Nueva versión</button>
+                        {marcandoPerdidaId === q.id ? (
+                          <span className="flex items-center gap-1">
+                            <input
+                              autoFocus value={motivoPerdidaTexto} onChange={(e) => setMotivoPerdidaTexto(e.target.value)}
+                              placeholder="Motivo (opcional)" className="w-32 rounded border border-rose-300 px-1.5 py-1 text-[11px]"
+                            />
+                            <button onClick={() => { marcarPerdida(q.id, motivoPerdidaTexto); setMarcandoPerdidaId(null); setMotivoPerdidaTexto(""); }} className="rounded bg-rose-600 px-1.5 py-1 text-[11px] font-medium text-white">Confirmar</button>
+                            <button onClick={() => { setMarcandoPerdidaId(null); setMotivoPerdidaTexto(""); }} className="text-[11px] underline">Cancelar</button>
+                          </span>
+                        ) : (
+                          <button onClick={() => setMarcandoPerdidaId(q.id)} disabled={soloLectura} className="rounded bg-rose-50 px-2 py-1 text-[11px] font-medium text-rose-700 disabled:opacity-40">Marcar como perdida</button>
+                        )}
                         <button onClick={() => volverABorrador(q.id)} disabled={soloLectura} className="rounded bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-500 disabled:opacity-40">¿Se marcó por error? Volver a borrador</button>
+                        <button onClick={() => setConfirmandoEliminarGrave({ id: q.id, numeroCompleto: `${q.numero}-${q.revision}`, estadoAnterior: q.estado })} disabled={soloLectura} title="Para cuando no se pierde el negocio, pero esta cotización no se va a enviar/usar por alguna otra razón" className="rounded border border-rose-300 px-2 py-1 text-[11px] font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-40">Inhabilitar</button>
+                      </>
+                    )}
+
+                    {q.estado === "PERDIDA" && (
+                      <>
+                        <span className="text-[11px] text-slate-400">{q.motivoPerdida ? `Motivo: ${q.motivoPerdida}` : "Sin motivo registrado"}</span>
+                        <button onClick={() => { actualizarCotizacionEnBD(q.id, { estado: "ENVIADA", motivoPerdida: null }); onEstadoCotizacionActualizado?.(`${q.numero}-${q.revision}`, { estado: "ENVIADA" }); }} disabled={soloLectura} className="rounded bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-500 disabled:opacity-40">¿Se marcó por error? Volver a enviada</button>
+                        <button onClick={() => setConfirmandoEliminarGrave({ id: q.id, numeroCompleto: `${q.numero}-${q.revision}`, estadoAnterior: q.estado })} disabled={soloLectura} className="rounded border border-rose-300 px-2 py-1 text-[11px] font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-40">Inhabilitar</button>
                       </>
                     )}
 
                     {q.estado === "GANADA" && (
-                      <button onClick={() => nuevaVersion(q)} disabled={soloLectura} className="flex items-center gap-1 rounded bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-700 disabled:opacity-40"><ArrowRight size={12} /> Nueva versión</button>
+                      <>
+                        <button onClick={() => nuevaVersion(q)} disabled={soloLectura} className="flex items-center gap-1 rounded bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-700 disabled:opacity-40"><ArrowRight size={12} /> Nueva versión</button>
+                        <button onClick={() => { actualizarCotizacionEnBD(q.id, { estado: "ENVIADA" }); onCancelarProyecto?.(q.id); onEstadoCotizacionActualizado?.(`${q.numero}-${q.revision}`, { estado: "ENVIADA" }); }} disabled={soloLectura} className="rounded bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-500 disabled:opacity-40">¿Se marcó por error? Volver a enviada</button>
+                        {marcandoPerdidaId === q.id ? (
+                          <span className="flex items-center gap-1">
+                            <input
+                              autoFocus value={motivoPerdidaTexto} onChange={(e) => setMotivoPerdidaTexto(e.target.value)}
+                              placeholder="Motivo (opcional)" className="w-32 rounded border border-rose-300 px-1.5 py-1 text-[11px]"
+                            />
+                            <button onClick={() => { marcarPerdida(q.id, motivoPerdidaTexto); setMarcandoPerdidaId(null); setMotivoPerdidaTexto(""); }} className="rounded bg-rose-600 px-1.5 py-1 text-[11px] font-medium text-white">Confirmar</button>
+                            <button onClick={() => { setMarcandoPerdidaId(null); setMotivoPerdidaTexto(""); }} className="text-[11px] underline">Cancelar</button>
+                          </span>
+                        ) : (
+                          <button onClick={() => setMarcandoPerdidaId(q.id)} disabled={soloLectura} title="El negocio no se concretó — el proyecto ligado (si existe) se cancela también" className="rounded bg-rose-50 px-2 py-1 text-[11px] font-medium text-rose-700 disabled:opacity-40">El negocio no se concretó — marcar como perdida</button>
+                        )}
+                        <button onClick={() => setConfirmandoEliminarGrave({ id: q.id, numeroCompleto: `${q.numero}-${q.revision}`, estadoAnterior: q.estado, tieneProyecto: proyectos.some((p) => p.cotizacionId === q.id) })} disabled={soloLectura} className="rounded border border-rose-300 px-2 py-1 text-[11px] font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-40">Inhabilitar</button>
+                      </>
+                    )}
+
+                    {q.estado === "REEMPLAZADA" && (
+                      <>
+                        <span className="text-[11px] text-slate-400">La versión más nueva de esta cotización se inhabilitó o eliminó — esta queda como la última disponible.</span>
+                        <button onClick={() => nuevaVersion(q)} disabled={soloLectura} className="flex items-center gap-1 rounded bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-700 disabled:opacity-40"><ArrowRight size={12} /> Nueva versión</button>
+                        <button onClick={() => setConfirmandoEliminarGrave({ id: q.id, numeroCompleto: `${q.numero}-${q.revision}`, estadoAnterior: q.estado })} disabled={soloLectura} className="rounded border border-rose-300 px-2 py-1 text-[11px] font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-40">Inhabilitar</button>
+                      </>
+                    )}
+
+                    {q.estado === "INHABILITADA" && (
+                      <>
+                        <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-medium text-slate-600">Inhabilitada</span>
+                        <button onClick={() => { const estadoRestaurado = q.estadoAntesDeInhabilitar || "ENVIADA"; actualizarCotizacionEnBD(q.id, { estado: estadoRestaurado }); onEstadoCotizacionActualizado?.(`${q.numero}-${q.revision}`, { estado: estadoRestaurado }); }} disabled={soloLectura} className="rounded bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-500 disabled:opacity-40">¿Fue un error? Habilitar de nuevo</button>
+                      </>
                     )}
                   </div>
 
@@ -3150,7 +4556,10 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
                         {versionesAnteriores.map((v) => (
                           <div key={v.id} className="flex items-center justify-between">
                             <span className="text-slate-500">{v.numero}-{v.revision} · {fmt(v.total)}{v.motivoVersion ? ` · ${v.motivoVersion}` : ""}</span>
-                            <button onClick={() => { setCotizacionPdf(v); setVista("pdf"); }} className="flex items-center gap-1 rounded bg-slate-50 px-2 py-0.5 font-medium text-slate-600 hover:bg-slate-100"><FileDown size={11} /> Ver PDF</button>
+                            <span className="flex items-center gap-1.5">
+                              <button onClick={() => { setCotizacionPdf(v); setVista("pdf"); }} className="flex items-center gap-1 rounded bg-slate-50 px-2 py-0.5 font-medium text-slate-600 hover:bg-slate-100"><FileDown size={11} /> Ver PDF</button>
+                              <button onClick={() => setConfirmandoEliminarGrave({ id: v.id, numeroCompleto: `${v.numero}-${v.revision}`, estadoAnterior: v.estado })} disabled={soloLectura} className="rounded border border-rose-200 px-1.5 py-0.5 font-medium text-rose-500 hover:bg-rose-50 disabled:opacity-40">Inhabilitar</button>
+                            </span>
                           </div>
                         ))}
                       </div>
@@ -3161,6 +4570,37 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
             })}
           </div>
         </>
+      )}
+
+      {confirmandoEliminarGrave && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-4">
+          <div className="w-full max-w-md rounded-2xl border-4 border-rose-600 bg-white p-6 text-center shadow-2xl">
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-rose-100">
+              <span className="text-3xl">⚠️</span>
+            </div>
+            <p className="mb-1 text-lg font-bold text-rose-700">¿Inhabilitar la cotización {confirmandoEliminarGrave.numeroCompleto}?</p>
+            <p className="mb-5 text-sm text-slate-600">
+              Esta cotización ya fue enviada o es una versión anterior con historial real, así que no se borra de verdad — queda marcada como "Inhabilitada" (en la app y en el Excel de OneDrive), fuera de las listas activas pero disponible si necesitas revisarla o revertir esto después.
+              {confirmandoEliminarGrave.tieneProyecto && (
+                <span className="mt-2 block rounded bg-amber-50 px-2 py-1.5 font-semibold text-amber-800">Esta cotización tiene un proyecto vinculado — el proyecto sigue igual, no se ve afectado.</span>
+              )}
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setConfirmandoEliminarGrave(null)}
+                className="flex-1 rounded-lg border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => { actualizarCotizacionEnBD(confirmandoEliminarGrave.id, { estado: "INHABILITADA", estadoAntesDeInhabilitar: confirmandoEliminarGrave.estadoAnterior }); onEstadoCotizacionActualizado?.(confirmandoEliminarGrave.numeroCompleto, { estado: "INHABILITADA" }); setConfirmandoEliminarGrave(null); }}
+                className="flex-1 rounded-lg bg-rose-600 px-4 py-3 text-sm font-semibold text-white hover:bg-rose-700"
+              >
+                Sí, inhabilitar
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {vista === "formulario" && enEdicion && (
@@ -3249,14 +4689,20 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
                 {enEdicion.items.map((it, idx) => (
                   <div key={idx} className="space-y-1.5 rounded-lg border border-slate-100 p-2">
                     <SelectorItemCatalogo opciones={catalogoItems} onAplicar={(id) => aplicarItemCatalogo(idx, id)} onCrear={(datos) => aplicarItemCatalogo(idx, crearItemCatalogo(datos))} />
+                    {/* Descripción en su propia fila, a todo el ancho — antes compartía una
+                        sola fila de 12 columnas con cantidad/unidad/precio y quedaba tan
+                        angosta que no se alcanzaba a ver lo que se estaba escribiendo. */}
                     <div className="grid grid-cols-12 gap-1.5">
-                      <input className={`${inputCls} col-span-2`} placeholder="Cant." type="number" value={it.cantidad} onChange={(e) => actualizarItem(idx, "cantidad", e.target.value)} />
-                      <select className={`${inputCls} col-span-2`} value={it.unidad} onChange={(e) => actualizarItem(idx, "unidad", e.target.value)}>
+                      <input className={`${inputCls} col-span-10`} placeholder="Descripción" value={it.descripcion} onChange={(e) => actualizarItem(idx, "descripcion", e.target.value)} />
+                      <button onClick={() => duplicarItem(idx)} title="Duplicar este ítem para editar la copia" className="col-span-1 rounded-lg border border-slate-200 text-slate-400 hover:bg-slate-50"><Copy size={14} className="mx-auto" /></button>
+                      <button onClick={() => quitarItem(idx)} className="col-span-1 rounded-lg border border-slate-200 text-slate-400"><X size={14} className="mx-auto" /></button>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      <input className={inputCls} placeholder="Cant." type="number" value={it.cantidad} onChange={(e) => actualizarItem(idx, "cantidad", e.target.value)} />
+                      <select className={inputCls} value={it.unidad} onChange={(e) => actualizarItem(idx, "unidad", e.target.value)}>
                         {UNIDADES_MEDIDA_COTIZACION.map((u) => <option key={u} value={u}>{u}</option>)}
                       </select>
-                      <input className={`${inputCls} col-span-5`} placeholder="Descripción" value={it.descripcion} onChange={(e) => actualizarItem(idx, "descripcion", e.target.value)} />
-                      <input className={`${inputCls} col-span-2`} placeholder="Precio unit." type="number" value={it.precio} onChange={(e) => actualizarItem(idx, "precio", e.target.value)} />
-                      <button onClick={() => quitarItem(idx)} className="col-span-1 rounded-lg border border-slate-200 text-slate-400"><X size={14} className="mx-auto" /></button>
+                      <input className={inputCls} placeholder="Precio unit." type="number" value={it.precio} onChange={(e) => actualizarItem(idx, "precio", e.target.value)} />
                     </div>
                   </div>
                 ))}
@@ -3335,16 +4781,36 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
                 );
               })()}
 
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <button onClick={() => setPrevia(true)} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-50">
                   <Eye size={15} /> Vista previa
                 </button>
-                <button onClick={guardarCotizacion} disabled={soloLectura} className="flex-1 rounded-lg bg-green-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-green-900 disabled:opacity-40">
-                  {modoEdicion === "NUEVA" && "Guardar como borrador"}
-                  {modoEdicion === "EDITAR_BORRADOR" && "Guardar cambios"}
-                  {modoEdicion === "NUEVA_VERSION" && "Guardar nueva versión y enviar"}
+                {(modoEdicion === "NUEVA" || modoEdicion === "EDITAR_BORRADOR") && (
+                  <button onClick={() => guardarCotizacion(false)} disabled={soloLectura || estadoGuardado === "guardando"} title="Queda como borrador, sin enviar — puedes seguir editándola después" className="flex-1 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40">
+                    {estadoGuardado === "guardando" ? "Guardando…" : "Guardar borrador (seguir editando)"}
+                  </button>
+                )}
+                <button
+                  onClick={() => guardarCotizacion(true)}
+                  disabled={soloLectura || estadoGuardado === "guardando"}
+                  title={modoEdicion === "NUEVA_VERSION" ? undefined : "Queda marcada como Enviada, lista para el cliente"}
+                  className="flex-1 rounded-lg bg-green-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-green-900 disabled:opacity-40"
+                >
+                  {estadoGuardado === "guardando" && "Guardando…"}
+                  {estadoGuardado !== "guardando" && (modoEdicion === "NUEVA" || modoEdicion === "EDITAR_BORRADOR") && "Finalizada — enviar al cliente"}
+                  {estadoGuardado !== "guardando" && modoEdicion === "NUEVA_VERSION" && "Guardar nueva versión y enviar"}
                 </button>
               </div>
+              {estadoGuardado === "listo" && (
+                <p className="mt-2 flex items-center gap-1.5 text-xs font-medium text-emerald-700">
+                  <CheckCircle2 size={14} /> Guardada — confirmado en la base de datos.
+                </p>
+              )}
+              {estadoGuardado === "error" && (
+                <p className="mt-2 flex items-center gap-1.5 text-xs font-medium text-rose-600">
+                  <AlertTriangle size={14} /> No se pudo guardar: {errorGuardado}
+                </p>
+              )}
             </div>
 
             {/* Vista previa en vivo, al lado del formulario */}
@@ -3468,7 +4934,7 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
       {vista === "pdf" && cotizacionPdf && (
         <div>
           <div className="no-print mb-3 flex justify-end gap-2">
-            <button onClick={() => window.print()} className="flex items-center gap-1.5 rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white"><FileDown size={14} /> Descargar PDF</button>
+            <button onClick={descargarPdf} disabled={descargandoPdf} className="flex items-center gap-1.5 rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-60"><FileDown size={14} /> {descargandoPdf ? "Generando…" : "Descargar PDF"}</button>
             <a
               href={`mailto:${cotizacionPdf.email || ""}?subject=${encodeURIComponent(`Cotización ${cotizacionPdf.numero}-${cotizacionPdf.revision}`)}&body=${encodeURIComponent(`Estimado(a) ${cotizacionPdf.atencion || ""},\n\nAdjunto nuestra cotización ${cotizacionPdf.numero}-${cotizacionPdf.revision} por ${fmt(cotizacionPdf.total)}.\n\nDescarga el PDF con el botón correspondiente y adjúntalo antes de enviar.`)}`}
               className="flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600"
@@ -3477,14 +4943,84 @@ function VistaCotizaciones({ cotizaciones, setCotizaciones, proyectos, crearProy
             </a>
             <button onClick={() => setVista("lista")} className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600"><X size={16} /></button>
           </div>
-          <PlantillaCotizacion
-            c={{ ...cotizacionPdf, numero: `${cotizacionPdf.numero}-${cotizacionPdf.revision}` }}
-            cliente={{ nombre: cliente(cotizacionPdf.clienteId), atencion: cotizacionPdf.atencion, direccion: cotizacionPdf.direccion, ciudad: cotizacionPdf.ciudad, email: cotizacionPdf.email, telefono: cotizacionPdf.telefono }}
-            totales={cotizacionPdf}
+          <PdfCotizacionConSubida
+            cotizacionPdf={cotizacionPdf}
+            cliente={cliente}
             nit={nit}
+            onPdfListo={onPdfGenerado}
+            onReintentarExcel={onGuardada}
+            contenedorRefExterno={pdfContenedorRef}
           />
         </div>
       )}
+    </div>
+  );
+}
+
+// Envuelve la plantilla de cotización para, apenas se muestra en pantalla,
+// capturarla como PDF real (no solo mandarla a imprimir) y subirla a
+// OneDrive automáticamente — así cada vez que alguien ve/descarga el PDF
+// de una cotización, queda también un archivo real guardado en la nube.
+function PdfCotizacionConSubida({ cotizacionPdf, cliente, nit, onPdfListo, onReintentarExcel, contenedorRefExterno }) {
+  const contenedorRefPropio = useRef(null);
+  const contenedorRef = contenedorRefExterno || contenedorRefPropio;
+  const yaSubidoRef = useRef(null); // evita subir el mismo PDF dos veces si el componente se vuelve a renderizar
+  const [estadoSubida, setEstadoSubida] = useState("pendiente"); // pendiente | subiendo | listo | error
+  const [errorSubida, setErrorSubida] = useState(null);
+
+  async function intentarSubirPdf() {
+    if (!contenedorRef.current || !onPdfListo) return;
+    setEstadoSubida("subiendo");
+    setErrorSubida(null);
+    try {
+      const blob = await generarPdfDesdeElemento(contenedorRef.current);
+      await onPdfListo(cotizacionPdf, blob);
+      setEstadoSubida("listo");
+    } catch (error) {
+      console.error("[PDF] No se pudo generar/subir el PDF de la cotización:", error);
+      setEstadoSubida("error");
+      setErrorSubida(error?.message || String(error));
+    }
+  }
+
+  useEffect(() => {
+    const clave = `${cotizacionPdf.numero}-${cotizacionPdf.revision}`;
+    if (yaSubidoRef.current === clave || !onPdfListo) return;
+    yaSubidoRef.current = clave;
+    // Pequeña espera para que el navegador termine de pintar (logo, tabla)
+    // antes de capturar — capturar de inmediato a veces sale con el logo
+    // sin cargar todavía.
+    const temporizador = setTimeout(intentarSubirPdf, 400);
+    return () => clearTimeout(temporizador);
+  }, [cotizacionPdf.numero, cotizacionPdf.revision]);
+
+  return (
+    <div>
+      {onPdfListo && (
+        <div className="no-print mb-2 flex items-center gap-2 text-xs">
+          {estadoSubida === "subiendo" && <span className="text-slate-500">Subiendo a OneDrive…</span>}
+          {estadoSubida === "listo" && <span className="text-emerald-600">✓ Subido a OneDrive (PDF y filas de Excel)</span>}
+          {estadoSubida === "error" && (
+            <span className="flex flex-wrap items-center gap-2 text-rose-600">
+              ✗ No se pudo subir a OneDrive: {errorSubida}
+            </span>
+          )}
+          <button
+            onClick={() => { intentarSubirPdf(); onReintentarExcel?.(cotizacionPdf); }}
+            className="rounded border border-slate-300 px-2 py-1 font-medium text-slate-600 hover:bg-slate-50"
+          >
+            {estadoSubida === "error" ? "Reintentar subida a OneDrive" : "Reenviar a OneDrive"}
+          </button>
+        </div>
+      )}
+      <div ref={contenedorRef}>
+        <PlantillaCotizacion
+          c={{ ...cotizacionPdf, numero: `${cotizacionPdf.numero}-${cotizacionPdf.revision}` }}
+          cliente={{ nombre: cliente(cotizacionPdf.clienteId), atencion: cotizacionPdf.atencion, direccion: cotizacionPdf.direccion, ciudad: cotizacionPdf.ciudad, email: cotizacionPdf.email, telefono: cotizacionPdf.telefono }}
+          totales={cotizacionPdf}
+          nit={nit}
+        />
+      </div>
     </div>
   );
 }
@@ -3495,9 +5031,9 @@ function PlantillaCotizacion({ c, cliente, totales, soloVista, nit }) {
     <div className={soloVista ? "" : "cot-print"}>
       <div className="mx-auto max-w-3xl border border-slate-300 bg-white text-[13px] text-slate-800">
         <div className="grid grid-cols-3 border-b border-slate-300">
-          <div className="col-span-2 border-r border-slate-300 p-4">
-            <img src={LOGO_SUA_SERVICE_B64} alt="Sua&Service Ingeniería" className="h-14 w-auto object-contain" />
-            <p className="mt-2 text-xs italic text-slate-500">Nit. {nit || "—"}</p>
+          <div className="col-span-2 border-r border-slate-300 p-4 text-center">
+            <img src={LOGO_SUA_SERVICE_B64} alt="Sua&Service Ingeniería" width={171} height={56} style={{ width: "171px", height: "56px", display: "block" }} className="mx-auto" />
+            <p className="mt-3 text-xs italic text-slate-500">Nit. {nit || "—"}</p>
             <p className="text-xs italic text-slate-500">suayserviceingenieria@gmail.com</p>
           </div>
           <div>
@@ -3512,7 +5048,13 @@ function PlantillaCotizacion({ c, cliente, totales, soloVista, nit }) {
           </div>
         </div>
 
-        <table className="w-full border-collapse text-xs">
+        <table className="w-full table-fixed border-collapse text-xs">
+          <colgroup>
+            <col style={{ width: "15%" }} />
+            <col style={{ width: "35%" }} />
+            <col style={{ width: "15%" }} />
+            <col style={{ width: "35%" }} />
+          </colgroup>
           <tbody>
             <tr>
               <td className="border border-slate-300 bg-lime-100 p-1.5 font-semibold italic">CLIENTE:</td>
@@ -3534,7 +5076,10 @@ function PlantillaCotizacion({ c, cliente, totales, soloVista, nit }) {
             <tr>
               <td className="border border-slate-300 bg-lime-100 p-1.5 font-semibold italic">Dirección:</td>
               <td className="border border-slate-300 p-1.5 text-center">{cliente?.direccion}</td>
-              <td colSpan={2} rowSpan={3} className="border border-slate-300 bg-lime-100 p-1.5 text-center align-middle font-semibold italic">{c.condiciones}</td>
+              <td colSpan={2} rowSpan={4} className="border border-slate-300 bg-lime-100 p-1.5 align-top font-semibold italic">
+                <div className="text-left text-[10px] font-semibold not-italic uppercase tracking-wide text-slate-500">Condiciones comerciales</div>
+                <div className="mt-3 text-center">{c.condiciones}</div>
+              </td>
             </tr>
             <tr>
               <td className="border border-slate-300 bg-lime-100 p-1.5 font-semibold italic">Ciudad:</td>
@@ -3546,7 +5091,7 @@ function PlantillaCotizacion({ c, cliente, totales, soloVista, nit }) {
             </tr>
             <tr>
               <td className="border border-slate-300 bg-lime-100 p-1.5 font-semibold italic">Teléfono:</td>
-              <td colSpan={3} className="border border-slate-300 p-1.5 text-center">{cliente?.telefono}</td>
+              <td className="border border-slate-300 p-1.5 text-center">{cliente?.telefono}</td>
             </tr>
           </tbody>
         </table>
@@ -3566,33 +5111,33 @@ function PlantillaCotizacion({ c, cliente, totales, soloVista, nit }) {
                 <td className="border border-slate-300 p-1.5 text-center">{it.cantidad}</td>
                 <td className="border border-slate-300 p-1.5 text-center">{it.unidad}</td>
                 <td className="border border-slate-300 p-1.5">{it.descripcion}</td>
-                <td className="border border-slate-300 p-1.5 text-right">$ {fmt2(it.precio)}</td>
-                <td className="border border-slate-300 p-1.5 text-right">$ {fmt2((Number(it.cantidad) || 0) * (Number(it.precio) || 0))}</td>
+                <td className="whitespace-nowrap border border-slate-300 p-1.5 text-right">$ {fmt2(it.precio)}</td>
+                <td className="whitespace-nowrap border border-slate-300 p-1.5 text-right">$ {fmt2((Number(it.cantidad) || 0) * (Number(it.precio) || 0))}</td>
               </tr>
             ))}
             {c.tipoCotizacion === "AIU" && (
               <>
-                <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right italic">Costo Directo</td><td className="border border-slate-300 p-1.5 text-right">$ {fmt2(totales.costoDirecto)}</td></tr>
-                <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right italic">Administración ({c.administracionPct}%)</td><td className="border border-slate-300 p-1.5 text-right">$ {fmt2(totales.administracion)}</td></tr>
-                <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right italic">Imprevistos ({c.imprevistosPct}%)</td><td className="border border-slate-300 p-1.5 text-right">$ {fmt2(totales.imprevistos)}</td></tr>
-                <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right italic">Utilidad ({c.utilidadPct}%)</td><td className="border border-slate-300 p-1.5 text-right">$ {fmt2(totales.utilidad)}</td></tr>
+                <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right italic">Costo Directo</td><td className="whitespace-nowrap border border-slate-300 p-1.5 text-right">$ {fmt2(totales.costoDirecto)}</td></tr>
+                <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right italic">Administración ({c.administracionPct}%)</td><td className="whitespace-nowrap border border-slate-300 p-1.5 text-right">$ {fmt2(totales.administracion)}</td></tr>
+                <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right italic">Imprevistos ({c.imprevistosPct}%)</td><td className="whitespace-nowrap border border-slate-300 p-1.5 text-right">$ {fmt2(totales.imprevistos)}</td></tr>
+                <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right italic">Utilidad ({c.utilidadPct}%)</td><td className="whitespace-nowrap border border-slate-300 p-1.5 text-right">$ {fmt2(totales.utilidad)}</td></tr>
               </>
             )}
-            <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right font-bold italic">SUBTOTAL</td><td className="border border-slate-300 p-1.5 text-right">$ {fmt2(totales.subtotalBruto)}</td></tr>
+            <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right font-bold italic">SUBTOTAL</td><td className="whitespace-nowrap border border-slate-300 p-1.5 text-right">$ {fmt2(totales.subtotalBruto)}</td></tr>
             {totales.descuentoValor > 0 && (
-              <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right italic">Descuento</td><td className="border border-slate-300 p-1.5 text-right">- $ {fmt2(totales.descuentoValor)}</td></tr>
+              <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right italic">Descuento</td><td className="whitespace-nowrap border border-slate-300 p-1.5 text-right">- $ {fmt2(totales.descuentoValor)}</td></tr>
             )}
-            <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right font-bold italic">IVA</td><td className="border border-slate-300 p-1.5 text-right">$ {fmt2(totales.iva)}</td></tr>
-            <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right font-bold italic">TOTAL</td><td className="border border-slate-300 p-1.5 text-right font-semibold">$ {fmt2(totales.total)}</td></tr>
+            <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right font-bold italic">IVA</td><td className="whitespace-nowrap border border-slate-300 p-1.5 text-right">$ {fmt2(totales.iva)}</td></tr>
+            <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right font-bold italic">TOTAL</td><td className="whitespace-nowrap border border-slate-300 p-1.5 text-right font-semibold">$ {fmt2(totales.total)}</td></tr>
             {(totales.retencionFuente > 0 || totales.retencionIca > 0) && (
               <>
                 {totales.retencionFuente > 0 && (
-                  <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right italic">ReteFuente (estimada)</td><td className="border border-slate-300 p-1.5 text-right">- $ {fmt2(totales.retencionFuente)}</td></tr>
+                  <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right italic">ReteFuente</td><td className="whitespace-nowrap border border-slate-300 p-1.5 text-right">- $ {fmt2(totales.retencionFuente)}</td></tr>
                 )}
                 {totales.retencionIca > 0 && (
-                  <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right italic">ReteICA (estimada)</td><td className="border border-slate-300 p-1.5 text-right">- $ {fmt2(totales.retencionIca)}</td></tr>
+                  <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right italic">ReteICA</td><td className="whitespace-nowrap border border-slate-300 p-1.5 text-right">- $ {fmt2(totales.retencionIca)}</td></tr>
                 )}
-                <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right font-bold italic">NETO ESTIMADO</td><td className="border border-slate-300 p-1.5 text-right font-semibold">$ {fmt2(totales.netoEstimado)}</td></tr>
+                <tr><td colSpan={4}></td><td className="border border-slate-300 p-1.5 text-right font-bold italic">VALOR TOTAL A PAGAR</td><td className="whitespace-nowrap border border-slate-300 p-1.5 text-right font-semibold">$ {fmt2(totales.netoEstimado)}</td></tr>
               </>
             )}
           </tbody>
@@ -3615,9 +5160,56 @@ function PlantillaCotizacion({ c, cliente, totales, soloVista, nit }) {
 }
 
 // ==================== PROYECTOS ====================
-function VistaProyectos({ proyectos, cliente, proveedor, crearProyectoDesdeOC, clientes, crearCliente, operaciones, actualizarOperacion, registrarOperacion, colaboradores, proveedores, crearProveedor, ordenesProduccion, productosTerminados, costosPorOrden, soloLectura }) {
+// Botón reutilizable para subir a OneDrive, como PDF, un informe que ya
+// está renderizado en pantalla (no se sube solo, a diferencia de los
+// comprobantes: estos informes son reportes "de corte" que se piden bajo
+// demanda, así que se suben cuando el usuario lo pide, no al abrirse).
+function BotonSubirPdfOneDrive({ contenedorRef, onSubir }) {
+  const [estado, setEstado] = useState("inactivo"); // inactivo | subiendo | listo | error
+
+  async function subir() {
+    if (!contenedorRef.current || !onSubir) return;
+    setEstado("subiendo");
+    try {
+      const blob = await generarPdfDesdeElemento(contenedorRef.current);
+      await onSubir(blob);
+      setEstado("listo");
+      setTimeout(() => setEstado("inactivo"), 2500);
+    } catch (error) {
+      console.error("[PDF] No se pudo subir el informe a OneDrive:", error);
+      setEstado("error");
+      setTimeout(() => setEstado("inactivo"), 3000);
+    }
+  }
+
+  return (
+    <button
+      onClick={subir}
+      disabled={estado === "subiendo"}
+      title="Subir este informe como PDF a OneDrive"
+      className="flex items-center justify-center gap-1.5 rounded-lg border border-blue-300 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+    >
+      {estado === "subiendo" ? (
+        "Subiendo…"
+      ) : estado === "listo" ? (
+        "✓ Subido"
+      ) : estado === "error" ? (
+        "Error al subir"
+      ) : (
+        <>
+          <UploadCloud size={14} /> OneDrive
+        </>
+      )}
+    </button>
+  );
+}
+
+function VistaProyectos({ proyectos, cliente, proveedor, crearProyectoDesdeOC, eliminarProyectoEnBD, clientes, crearCliente, operaciones, actualizarOperacion, registrarOperacion, colaboradores, proveedores, crearProveedor, ordenesProduccion, productosTerminados, costosPorOrden, soloLectura, onExportar, onPdfInformeListo }) {
   const [nueva, setNueva] = useState(null);
   const [viendoInformeGeneral, setViendoInformeGeneral] = useState(false);
+  const [confirmandoEliminarProyecto, setConfirmandoEliminarProyecto] = useState(null); // { id, nombre, tieneCostos }
+  const refInformeProyecto = useRef(null);
+  const refInformeGeneral = useRef(null);
 
   function exportarProyectosExcel() {
     const filas = proyectos.map((p) => ({
@@ -3628,6 +5220,10 @@ function VistaProyectos({ proyectos, cliente, proveedor, crearProyectoDesdeOC, c
     ws["!cols"] = [{ wch: 32 }, { wch: 26 }, { wch: 20 }, { wch: 16 }, { wch: 14 }, { wch: 14 }, { wch: 10 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Proyectos");
+    onExportar?.(proyectos.map((p) => [
+      p.nombre, cliente(p.clienteId), p.origen === "COTIZACION" ? `Cotización ${p.cotizacionNumero}` : `OC ${p.numeroOrdenCompra}`,
+      p.valorReferencia, p.costoTotal, p.margen, Math.round(p.avancePct),
+    ]));
     XLSX.writeFile(wb, `Proyectos_${hoy()}.xlsx`);
   }
   const [previaProyecto, setPreviaProyecto] = useState(null); // vista previa antes de crear el proyecto
@@ -3765,22 +5361,67 @@ function VistaProyectos({ proyectos, cliente, proveedor, crearProyectoDesdeOC, c
 
       <div className="space-y-3">
         {proyectos.map((p) => (
-          <button key={p.id} onClick={() => setViendoDetalle(p.id)} className="block w-full rounded-xl border border-slate-200 bg-white p-4 text-left hover:border-green-300 hover:bg-green-50/30">
-            <p className="font-medium text-slate-900">{p.nombre}</p>
-            <p className="text-xs text-slate-500">
-              {cliente(p.clienteId)} · {p.origen === "COTIZACION" ? `Cotización ${p.cotizacionNumero}` : `OC ${p.numeroOrdenCompra}`}
-            </p>
-            <div className="mt-3 grid grid-cols-3 gap-3 text-xs">
-              <div><p className="text-slate-400">{p.origen === "COTIZACION" ? "Cotizado (sin IVA)" : "Orden de compra (sin IVA)"}</p><p className="font-semibold">{fmt(p.valorReferencia)}</p></div>
-              <div><p className="text-slate-400">Ejecutado</p><p className="font-semibold">{fmt(p.costoTotal)}</p></div>
-              <div><p className="text-slate-400">Margen</p><p className={`flex items-center gap-1 font-semibold ${p.margen >= 0 ? "text-emerald-700" : "text-rose-600"}`}>{p.margen >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}{fmt(p.margen)}</p></div>
-            </div>
-            <div className="mt-2 h-1.5 rounded-full bg-slate-100"><div className={`h-1.5 rounded-full ${p.avancePct > 100 ? "bg-rose-500" : "bg-green-600"}`} style={{ width: `${Math.min(p.avancePct, 100)}%` }} /></div>
-            <p className="mt-2 text-[11px] font-medium text-green-700">Ver detalle de costos →</p>
-          </button>
+          <div key={p.id} className={`relative rounded-xl border p-4 ${p.estado === "CANCELADA" ? "border-slate-200 bg-slate-50/60 opacity-70 hover:border-slate-300" : "border-slate-200 bg-white hover:border-green-300 hover:bg-green-50/30"}`}>
+            {!soloLectura && (
+              <button
+                onClick={(e) => { e.stopPropagation(); setConfirmandoEliminarProyecto({ id: p.id, nombre: p.nombre, tieneCostos: p.costoTotal > 0 }); }}
+                title="Eliminar proyecto"
+                className="absolute right-3 top-3 z-10 rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+              >
+                <Trash2 size={14} />
+              </button>
+            )}
+            <button onClick={() => setViendoDetalle(p.id)} className="block w-full text-left">
+              <p className="pr-7 font-medium text-slate-900">
+                {p.nombre}
+                {p.estado === "CANCELADA" && <span className="ml-2 rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-medium text-rose-600">Cancelado — el negocio no se concretó</span>}
+              </p>
+              <p className="text-xs text-slate-500">
+                {cliente(p.clienteId)} · {p.origen === "COTIZACION" ? `Cotización ${p.cotizacionNumero}` : `OC ${p.numeroOrdenCompra}`}
+              </p>
+              <div className="mt-3 grid grid-cols-3 gap-3 text-xs">
+                <div><p className="text-slate-400">{p.origen === "COTIZACION" ? "Cotizado (sin IVA)" : "Orden de compra (sin IVA)"}</p><p className="font-semibold">{fmt(p.valorReferencia)}</p></div>
+                <div><p className="text-slate-400">Ejecutado</p><p className="font-semibold">{fmt(p.costoTotal)}</p></div>
+                <div><p className="text-slate-400">Margen</p><p className={`flex items-center gap-1 font-semibold ${p.margen >= 0 ? "text-emerald-700" : "text-rose-600"}`}>{p.margen >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}{fmt(p.margen)}</p></div>
+              </div>
+              <div className="mt-2 h-1.5 rounded-full bg-slate-100"><div className={`h-1.5 rounded-full ${p.avancePct > 100 ? "bg-rose-500" : "bg-green-600"}`} style={{ width: `${Math.min(p.avancePct, 100)}%` }} /></div>
+              <p className="mt-2 text-[11px] font-medium text-green-700">Ver detalle de costos →</p>
+            </button>
+          </div>
         ))}
         {!proyectos.length && <p className="text-sm text-slate-400">Aún no hay proyectos.</p>}
       </div>
+
+      {confirmandoEliminarProyecto && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-4">
+          <div className="w-full max-w-md rounded-2xl border-4 border-rose-600 bg-white p-6 text-center shadow-2xl">
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-rose-100">
+              <span className="text-3xl">⚠️</span>
+            </div>
+            <p className="mb-1 text-lg font-bold text-rose-700">¿Eliminar el proyecto "{confirmandoEliminarProyecto.nombre}"?</p>
+            <p className="mb-5 text-sm text-slate-600">
+              Esta acción borra el proyecto por completo y no se puede deshacer.
+              {confirmandoEliminarProyecto.tieneCostos && (
+                <span className="mt-2 block rounded bg-amber-50 px-2 py-1.5 font-semibold text-amber-800">Este proyecto tiene costos/operaciones registradas — se perderá esa información de costeo.</span>
+              )}
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setConfirmandoEliminarProyecto(null)}
+                className="flex-1 rounded-lg border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => { eliminarProyectoEnBD?.(confirmandoEliminarProyecto.id); setConfirmandoEliminarProyecto(null); }}
+                className="flex-1 rounded-lg bg-rose-600 px-4 py-3 text-sm font-semibold text-white hover:bg-rose-700"
+              >
+                Sí, eliminar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {nueva && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
@@ -4128,7 +5769,7 @@ function VistaProyectos({ proyectos, cliente, proveedor, crearProyectoDesdeOC, c
 
       {viendoInforme && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-          <div className="liq-print max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
+          <div ref={refInformeProyecto} className="liq-print max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
             <div className="mb-4 border-b border-slate-200 pb-3 text-center">
               <p className="text-sm font-semibold text-slate-900">SUA &amp; SERVICE INGENIERÍA S.A.S.</p>
               <p className="text-xs text-slate-500">Informe de costeo de proyecto</p>
@@ -4152,6 +5793,7 @@ function VistaProyectos({ proyectos, cliente, proveedor, crearProyectoDesdeOC, c
             <p className="mt-1 text-[11px] text-slate-400">Avance de ejecución: {viendoInforme.avancePct.toFixed(0)}%</p>
             <div className="no-print mt-5 flex gap-2">
               <button onClick={() => window.print()} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white hover:bg-green-900"><FileDown size={14} /> PDF</button>
+              {onPdfInformeListo && <BotonSubirPdfOneDrive contenedorRef={refInformeProyecto} onSubir={(blob) => onPdfInformeListo(`CosteoProyecto_${viendoInforme.nombre}`, blob)} />}
               <button onClick={() => setViendoInforme(null)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600"><X size={16} /></button>
             </div>
           </div>
@@ -4165,7 +5807,7 @@ function VistaProyectos({ proyectos, cliente, proveedor, crearProyectoDesdeOC, c
         const margenPromedioPct = totalCotizado ? (totalMargen / totalCotizado) * 100 : 0;
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-            <div className="liq-print max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
+            <div ref={refInformeGeneral} className="liq-print max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
               <div className="mb-4 border-b border-slate-200 pb-3 text-center">
                 <p className="text-sm font-semibold text-slate-900">SUA &amp; SERVICE INGENIERÍA S.A.S.</p>
                 <p className="text-xs text-slate-500">Informe gerencial de proyectos</p>
@@ -4197,6 +5839,7 @@ function VistaProyectos({ proyectos, cliente, proveedor, crearProyectoDesdeOC, c
               <div className="no-print mt-5 flex gap-2">
                 <button onClick={exportarProyectosExcel} className="flex items-center gap-1.5 rounded-lg border border-green-300 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 hover:bg-green-100"><FileDown size={14} /> Excel</button>
                 <button onClick={() => window.print()} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white hover:bg-green-900"><FileDown size={14} /> PDF</button>
+                {onPdfInformeListo && <BotonSubirPdfOneDrive contenedorRef={refInformeGeneral} onSubir={(blob) => onPdfInformeListo("InformeGerencialProyectos", blob)} />}
                 <button onClick={() => setViendoInformeGeneral(false)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600"><X size={16} /></button>
               </div>
             </div>
@@ -4208,12 +5851,13 @@ function VistaProyectos({ proyectos, cliente, proveedor, crearProyectoDesdeOC, c
 }
 
 // ==================== CUENTAS X COBRAR ====================
-function VistaTerceros({ clientes, proveedores, crearCliente, crearProveedor, actualizarCliente, actualizarProveedor, operaciones, soloLectura }) {
+function VistaTerceros({ clientes, proveedores, crearCliente, crearProveedor, actualizarCliente, actualizarProveedor, eliminarCliente, eliminarProveedor, operaciones, soloLectura, onExportar, soloClientes, soloProveedores }) {
   const labelCls = "mb-1 block text-xs font-medium text-slate-600";
   const inputCls = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-600";
-  const [tab, setTab] = useState("CLIENTES");
+  const [tab, setTab] = useState(soloProveedores ? "PROVEEDORES" : "CLIENTES");
   const [editando, setEditando] = useState(null); // { id, tipo, ...campos } — tercero en edición
   const [nuevo, setNuevo] = useState(null); // { tipo, nombre, nit, direccion, telefono } — nuevo tercero
+  const [confirmandoEliminarTercero, setConfirmandoEliminarTercero] = useState(null); // id del tercero a confirmar
 
   function abrirEditar(t, tipo) {
     setEditando({ ...t, tipo });
@@ -4227,6 +5871,7 @@ function VistaTerceros({ clientes, proveedores, crearCliente, crearProveedor, ac
     wsProveedores["!cols"] = [{ wch: 32 }, { wch: 16 }, { wch: 32 }, { wch: 16 }];
     XLSX.utils.book_append_sheet(wb, wsProveedores, "Proveedores");
     XLSX.writeFile(wb, `Terceros_${hoy()}.xlsx`);
+    onExportar?.();
   }
   function guardarEdicion() {
     if (!editando.nombre) return;
@@ -4249,11 +5894,15 @@ function VistaTerceros({ clientes, proveedores, crearCliente, crearProveedor, ac
 
   return (
     <div>
-      <h1 className="mb-1 text-xl font-semibold">Terceros</h1>
-      <p className="mb-5 text-sm text-slate-500">Clientes y proveedores, con sus datos completos — NIT, dirección y teléfono, para usar en facturas, comprobantes y estados de cuenta.</p>
+      <h1 className="mb-1 text-xl font-semibold">{soloProveedores ? "Proveedores" : soloClientes ? "Clientes" : "Terceros"}</h1>
+      <p className="mb-5 text-sm text-slate-500">
+        {soloProveedores ? "Proveedores, con sus datos completos — NIT, dirección y teléfono, para usar en cuentas por pagar y comprobantes."
+          : soloClientes ? "Clientes, con sus datos completos — NIT, dirección y teléfono, para usar en cotizaciones y facturas."
+          : "Clientes y proveedores, con sus datos completos — NIT, dirección y teléfono, para usar en facturas, comprobantes y estados de cuenta."}
+      </p>
 
       <div className="mb-4 flex gap-2">
-        {["CLIENTES", "PROVEEDORES"].map((t) => (
+        {!soloClientes && !soloProveedores && ["CLIENTES", "PROVEEDORES"].map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`rounded-lg border px-3 py-1.5 text-xs font-medium ${tab === t ? "border-green-700 bg-green-700 text-white" : "border-slate-300 text-slate-600"}`}>
             {t === "CLIENTES" ? "Clientes" : "Proveedores"}
           </button>
@@ -4282,7 +5931,19 @@ function VistaTerceros({ clientes, proveedores, crearCliente, crearProveedor, ac
                   </div>
                   <p className="mt-1 text-[10px] text-slate-400">{numOperaciones} {tipoOp === "VENTA" ? "venta(s)" : "compra(s)"} registrada(s)</p>
                 </div>
-                <button onClick={() => abrirEditar(t, tab)} disabled={soloLectura} className="shrink-0 rounded border border-slate-300 px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40">Editar</button>
+                <div className="flex shrink-0 gap-1.5">
+                  <button onClick={() => abrirEditar(t, tab)} disabled={soloLectura} className="rounded border border-slate-300 px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40">Editar</button>
+                  {!soloLectura && (
+                    confirmandoEliminarTercero === t.id ? (
+                      <span className="flex items-center gap-1">
+                        <button onClick={() => { (tab === "CLIENTES" ? eliminarCliente : eliminarProveedor)(t.id); setConfirmandoEliminarTercero(null); }} className="rounded bg-rose-600 px-2 py-1 text-[11px] font-medium text-white">Sí, eliminar</button>
+                        <button onClick={() => setConfirmandoEliminarTercero(null)} className="rounded border border-slate-300 px-2 py-1 text-[11px] text-slate-500">Cancelar</button>
+                      </span>
+                    ) : (
+                      <button onClick={() => setConfirmandoEliminarTercero(t.id)} className="rounded border border-rose-300 px-2 py-1 text-[11px] font-medium text-rose-600 hover:bg-rose-50">Eliminar</button>
+                    )
+                  )}
+                </div>
               </div>
             </div>
           );
@@ -4322,7 +5983,7 @@ function VistaTerceros({ clientes, proveedores, crearCliente, crearProveedor, ac
   );
 }
 
-function VistaCXC({ carteraPorCliente, ventasPendientes, cliente, clienteInfo, registrarOperacion, operaciones, actualizarOperacion, eliminarOperacion, soloLectura }) {
+function VistaCXC({ carteraPorCliente, ventasPendientes, cliente, clienteInfo, registrarOperacion, operaciones, actualizarOperacion, eliminarOperacion, soloLectura, onExportar, onPdfCobroPagoListo }) {
   const [cobrando, setCobrando] = useState(null); // la venta que se está cobrando/abonando, o null
   const [viendoMovimientos, setViendoMovimientos] = useState(null); // factura cuyos cobros se están listando
   const [viendoComprobante, setViendoComprobante] = useState(null); // { operacion, tercero, factura } a imprimir
@@ -4340,6 +6001,11 @@ function VistaCXC({ carteraPorCliente, ventasPendientes, cliente, clienteInfo, r
     const ws = XLSX.utils.json_to_sheet(filas);
     ws["!cols"] = [{ wch: 12 }, { wch: 28 }, { wch: 32 }, { wch: 16 }, { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 12 }];
     const wb = XLSX.utils.book_new();
+    onExportar?.(ventasPendientes.map((v) => [
+      v.fecha, cliente(v.clienteId), v.concepto, v.numeroFacturaElectronica || "",
+      v.valor + v.iva, (v.retencionFuente || 0) + (v.retencionIca || 0) + (v.retencionIva || 0),
+      v.pendiente, v.fechaVencimiento || "Contado", v.antiguedad,
+    ]));
     XLSX.utils.book_append_sheet(wb, ws, "Cartera");
     XLSX.writeFile(wb, `Cartera_${hoy()}.xlsx`);
   }
@@ -4357,11 +6023,13 @@ function VistaCXC({ carteraPorCliente, ventasPendientes, cliente, clienteInfo, r
   function confirmarCobro() {
     if (!cobrando || !cobrando.cuentaId || !Number(cobrando.valor)) return;
     const v = ventasPendientes.find((x) => x.id === cobrando.ventaId);
-    registrarOperacion({
+    const payload = {
       tipo: "COBRO", fecha: cobrando.fecha, concepto: `${Number(cobrando.valor) >= v.pendiente ? "Cobro" : "Abono"} · ${v.concepto}`,
       valor: Number(cobrando.valor), iva: 0, clienteId: v.clienteId, cuentaId: cobrando.cuentaId, relId: v.id,
-    });
+    };
+    const creada = registrarOperacion(payload);
     setCobrando(null);
+    setViendoComprobante({ operacion: creada || payload, tercero: cliente(v.clienteId), nitTercero: clienteInfo(v.clienteId)?.nit, factura: v, esNuevo: true });
   }
 
   return (
@@ -4497,10 +6165,10 @@ function VistaCXC({ carteraPorCliente, ventasPendientes, cliente, clienteInfo, r
             <p className="mb-1 text-xs text-slate-500">{viendoMovimientos.concepto} — {cliente(viendoMovimientos.clienteId)}</p>
             <button onClick={() => setViendoFactura(viendoMovimientos.id)} className="mb-3 text-[11px] font-medium text-green-700 hover:underline">Ver factura original</button>
             <div className="space-y-2">
-              {operaciones.filter((o) => o.tipo === "COBRO" && o.relId === viendoMovimientos.id).length === 0 && (
+              {operaciones.filter((o) => o.tipo === "COBRO" && String(o.relId) === viendoMovimientos.id).length === 0 && (
                 <p className="text-xs text-slate-400">Todavía no se ha registrado ningún cobro sobre esta factura.</p>
               )}
-              {operaciones.filter((o) => o.tipo === "COBRO" && o.relId === viendoMovimientos.id).map((o) => (
+              {operaciones.filter((o) => o.tipo === "COBRO" && String(o.relId) === viendoMovimientos.id).map((o) => (
                 <div key={o.id} className="rounded-lg border border-slate-100 px-3 py-2 text-xs">
                   {editandoMovimiento?.id === o.id ? (
                     <div className="space-y-2">
@@ -4541,7 +6209,7 @@ function VistaCXC({ carteraPorCliente, ventasPendientes, cliente, clienteInfo, r
         </div>
       )}
 
-      {viendoComprobante && <ComprobanteMovimiento operacion={viendoComprobante.operacion} tercero={viendoComprobante.tercero} nitTercero={viendoComprobante.nitTercero} factura={viendoComprobante.factura} onCerrar={() => setViendoComprobante(null)} />}
+      {viendoComprobante && <ComprobanteMovimiento operacion={viendoComprobante.operacion} tercero={viendoComprobante.tercero} nitTercero={viendoComprobante.nitTercero} factura={viendoComprobante.factura} onCerrar={() => setViendoComprobante(null)} esNuevo={viendoComprobante.esNuevo} onPdfListo={onPdfCobroPagoListo} />}
       {viendoFactura && (() => {
         const v = operaciones.find((o) => o.id === viendoFactura);
         if (!v) return null;
@@ -4555,7 +6223,8 @@ function VistaCXC({ carteraPorCliente, ventasPendientes, cliente, clienteInfo, r
 }
 
 // ==================== CUENTAS X PAGAR ====================
-function VistaCXP({ cxpPorProveedor, comprasPendientes, liquidacionesPendientes, provisionPrestaciones, proveedor, proveedorInfo, pasivosFinancieros, setPasivosFinancieros, registrarOperacion, operaciones, actualizarOperacion, eliminarOperacion, soloLectura }) {
+function VistaCXP({ cxpPorProveedor, comprasPendientes, liquidacionesPendientes, provisionPrestaciones, proveedor, proveedorInfo, pasivosFinancieros, crearPasivoFinancieroEnBD, registrarOperacion, operaciones, actualizarOperacion, eliminarOperacion, soloLectura, onExportar, proveedores, crearProveedor, actualizarProveedor, eliminarProveedor, onExportarProveedores, onPdfCobroPagoListo }) {
+  const [pestanaPrincipal, setPestanaPrincipal] = useState("cxp"); // cxp | proveedores
   const [nuevo, setNuevo] = useState(null);
   const [pagando, setPagando] = useState(null); // la compra que se está pagando/abonando, o null
   const [viendoMovimientos, setViendoMovimientos] = useState(null); // factura cuyos pagos se están listando
@@ -4589,6 +6258,21 @@ function VistaCXP({ cxpPorProveedor, comprasPendientes, liquidacionesPendientes,
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(filasProvision), "Provisión estimada");
 
     XLSX.writeFile(wb, `Cuentas_por_pagar_${hoy()}.xlsx`);
+    onExportar?.({
+      comprasGastos: comprasPendientes.map((c) => [
+        c.fecha, proveedor(c.proveedorId), c.concepto, c.numeroFacturaProveedor || "",
+        c.valor + c.iva, (c.retencionFuente || 0) + (c.retencionIca || 0) + (c.retencionIva || 0),
+        c.pendiente, c.fechaVencimiento || "Contado", c.antiguedad,
+      ]),
+      prestaciones: liquidacionesPendientes.map((l) => [l.colaboradorNombre, l.tipo, l.fechaVencimiento, l.pendiente]),
+      provision: [
+        ["Cesantías", provisionPrestaciones.cesantias],
+        ["Intereses sobre cesantías", provisionPrestaciones.intereses],
+        ["Prima de servicios", provisionPrestaciones.prima],
+        ["Vacaciones causadas", provisionPrestaciones.vacaciones],
+        ["TOTAL", provisionPrestaciones.total],
+      ],
+    });
   }
 
   function guardarEdicionMovimiento() {
@@ -4607,29 +6291,47 @@ function VistaCXP({ cxpPorProveedor, comprasPendientes, liquidacionesPendientes,
   function confirmarPago() {
     if (!pagando || !pagando.cuentaId || !Number(pagando.valor)) return;
     const c = comprasPendientes.find((x) => x.id === pagando.compraId);
-    registrarOperacion({
+    const payload = {
       tipo: "PAGO", fecha: pagando.fecha, concepto: `${Number(pagando.valor) >= c.pendiente ? "Pago" : "Abono"} · ${c.concepto}`,
       valor: Number(pagando.valor), iva: 0, proveedorId: c.proveedorId, cuentaId: pagando.cuentaId, relId: c.id,
-    });
+    };
+    const creada = registrarOperacion(payload);
     setPagando(null);
+    setViendoComprobante({ operacion: creada || payload, tercero: proveedor(c.proveedorId), nitTercero: proveedorInfo(c.proveedorId)?.nit, factura: c, esNuevo: true });
   }
   const inputCls = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm";
   const labelCls = "mb-1 block text-xs font-medium text-slate-600";
 
   function guardar() {
     if (!nuevo.entidad || !nuevo.saldoActual) return;
-    setPasivosFinancieros((ps) => [...ps, {
+    crearPasivoFinancieroEnBD({
       id: `pf${Date.now()}`, entidad: nuevo.entidad, tipo: nuevo.tipo, concepto: nuevo.concepto,
       valorCapital: Number(nuevo.valorCapital) || Number(nuevo.saldoActual), saldoActual: Number(nuevo.saldoActual),
       tasaEA: Number(nuevo.tasaEA) || null, cuotaMensual: Number(nuevo.cuotaMensual) || null,
       plazoMeses: Number(nuevo.plazoMeses) || null, fechaDesembolso: nuevo.fechaDesembolso || null,
       fechaVencimientoFinal: nuevo.fechaVencimientoFinal || null, estado: "VIGENTE",
-    }]);
+    });
     setNuevo(null);
   }
 
   return (
     <div>
+      <div className="mb-4 flex gap-2">
+        {[{ id: "cxp", label: "Cuentas por pagar" }, { id: "proveedores", label: "Proveedores" }].map((t) => (
+          <button key={t.id} onClick={() => setPestanaPrincipal(t.id)} className={`rounded-lg border px-3 py-1.5 text-xs font-medium ${pestanaPrincipal === t.id ? "border-green-700 bg-green-700 text-white" : "border-slate-300 text-slate-600"}`}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {pestanaPrincipal === "proveedores" ? (
+        <VistaTerceros
+          clientes={[]} proveedores={proveedores} crearCliente={() => {}} crearProveedor={crearProveedor}
+          actualizarCliente={() => {}} actualizarProveedor={actualizarProveedor} eliminarCliente={() => {}} eliminarProveedor={eliminarProveedor}
+          operaciones={operaciones} soloLectura={soloLectura} onExportar={onExportarProveedores} soloProveedores
+        />
+      ) : (
+      <div>
       <div className="mb-1 flex items-center justify-between">
         <h1 className="text-xl font-semibold">Cuentas por pagar</h1>
         <button onClick={exportarCxpExcel} className="flex items-center gap-1.5 rounded-lg border border-green-300 bg-green-50 px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-100"><FileDown size={13} /> Excel</button>
@@ -4853,10 +6555,10 @@ function VistaCXP({ cxpPorProveedor, comprasPendientes, liquidacionesPendientes,
             <p className="mb-1 text-xs text-slate-500">{viendoMovimientos.concepto} — {proveedor(viendoMovimientos.proveedorId)}</p>
             <button onClick={() => setViendoFactura(viendoMovimientos.id)} className="mb-3 text-[11px] font-medium text-green-700 hover:underline">Ver factura original</button>
             <div className="space-y-2">
-              {operaciones.filter((o) => o.tipo === "PAGO" && o.relId === viendoMovimientos.id).length === 0 && (
+              {operaciones.filter((o) => o.tipo === "PAGO" && String(o.relId) === viendoMovimientos.id).length === 0 && (
                 <p className="text-xs text-slate-400">Todavía no se ha registrado ningún pago sobre esta factura.</p>
               )}
-              {operaciones.filter((o) => o.tipo === "PAGO" && o.relId === viendoMovimientos.id).map((o) => (
+              {operaciones.filter((o) => o.tipo === "PAGO" && String(o.relId) === viendoMovimientos.id).map((o) => (
                 <div key={o.id} className="rounded-lg border border-slate-100 px-3 py-2 text-xs">
                   {editandoMovimiento?.id === o.id ? (
                     <div className="space-y-2">
@@ -4897,7 +6599,7 @@ function VistaCXP({ cxpPorProveedor, comprasPendientes, liquidacionesPendientes,
         </div>
       )}
 
-      {viendoComprobante && <ComprobanteMovimiento operacion={viendoComprobante.operacion} tercero={viendoComprobante.tercero} nitTercero={viendoComprobante.nitTercero} factura={viendoComprobante.factura} onCerrar={() => setViendoComprobante(null)} />}
+      {viendoComprobante && <ComprobanteMovimiento operacion={viendoComprobante.operacion} tercero={viendoComprobante.tercero} nitTercero={viendoComprobante.nitTercero} factura={viendoComprobante.factura} onCerrar={() => setViendoComprobante(null)} esNuevo={viendoComprobante.esNuevo} onPdfListo={onPdfCobroPagoListo} />}
       {viendoFactura && (() => {
         const c = operaciones.find((o) => o.id === viendoFactura);
         if (!c) return null;
@@ -4906,16 +6608,19 @@ function VistaCXP({ cxpPorProveedor, comprasPendientes, liquidacionesPendientes,
       {viendoEstadoCuenta && (
         <EstadoCuentaProveedor proveedorId={viendoEstadoCuenta.proveedorId} nombreProveedor={viendoEstadoCuenta.nombreProveedor} infoProveedor={proveedorInfo(viendoEstadoCuenta.proveedorId)} operaciones={operaciones} onCerrar={() => setViendoEstadoCuenta(null)} />
       )}
+      </div>
+      )}
     </div>
   );
 }
 
 // ==================== PRESUPUESTO ====================
-function VistaPresupuesto({ costos, setCostos, proyectos, operaciones, colaboradores, soloLectura }) {
+function VistaPresupuesto({ costos, crearCostoEnBD, actualizarCostoEnBD, eliminarCostoEnBD, proyectos, operaciones, colaboradores, soloLectura, onPdfInformeListo }) {
   const [form, setForm] = useState(null);
   const [editandoCosto, setEditandoCosto] = useState(null); // costo existente que se está editando
   const [confirmandoEliminarCosto, setConfirmandoEliminarCosto] = useState(null); // id a eliminar
   const [viendoInformePresupuesto, setViendoInformePresupuesto] = useState(false);
+  const refInformePresupuesto = useRef(null);
   const generales = costos.filter((c) => !c.unidadOperativaId);
   const fuentesDisponibles = operaciones.filter((o) => o.tipo === "COMPRA" || o.tipo === "GASTO");
 
@@ -4999,7 +6704,7 @@ function VistaPresupuesto({ costos, setCostos, proyectos, operaciones, colaborad
       tipoCosto: l.tipoCosto, concepto: l.concepto, periodicidad: l.periodicidad, valor: l.valor, meses: l.meses,
       operacionReferenciaId: l.operacionReferenciaId,
     }));
-    setCostos((cs) => [...cs, ...nuevos]);
+    nuevos.forEach((n) => crearCostoEnBD(n));
     setForm(null);
   }
 
@@ -5011,11 +6716,11 @@ function VistaPresupuesto({ costos, setCostos, proyectos, operaciones, colaborad
 
   function guardarEdicion() {
     if (!editandoCosto.concepto || !editandoCosto.valor) return;
-    setCostos((cs) => cs.map((c) => (c.id === editandoCosto.id ? { ...c, concepto: editandoCosto.concepto, tipoCosto: editandoCosto.tipoCosto, categoriaCosto: editandoCosto.categoriaCosto || null, periodicidad: editandoCosto.periodicidad, valor: Number(editandoCosto.valor), meses: Number(editandoCosto.meses) || 1, operacionReferenciaId: editandoCosto.operacionReferenciaId || null } : c)));
+    actualizarCostoEnBD(editandoCosto.id, { concepto: editandoCosto.concepto, tipoCosto: editandoCosto.tipoCosto, categoriaCosto: editandoCosto.categoriaCosto || null, periodicidad: editandoCosto.periodicidad, valor: Number(editandoCosto.valor), meses: Number(editandoCosto.meses) || 1, operacionReferenciaId: editandoCosto.operacionReferenciaId || null });
     setEditandoCosto(null);
   }
   function eliminarCosto(id) {
-    setCostos((cs) => cs.filter((c) => c.id !== id));
+    eliminarCostoEnBD(id);
     setConfirmandoEliminarCosto(null);
   }
 
@@ -5125,7 +6830,7 @@ function VistaPresupuesto({ costos, setCostos, proyectos, operaciones, colaborad
             <div className="max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-xl bg-white p-5">
               <div className="mb-4 flex items-center justify-between"><p className="text-sm font-semibold">Nuevo costo proyectado</p><button onClick={() => setForm(null)}><X size={18} /></button></div>
               <div className="space-y-3">
-                <Selector label="Proyecto (vacío = general)" opciones={[{ id: "", nombre: "General de la empresa" }, ...proyectos]} valor={form.unidadOperativaId} onChange={(v) => setForm((f) => ({ ...f, unidadOperativaId: v || null }))} />
+                <Selector label="Proyecto (vacío = general)" opciones={[{ id: "", nombre: "General de la empresa" }, ...proyectos.filter((p) => p.estado !== "CANCELADA")]} valor={form.unidadOperativaId} onChange={(v) => setForm((f) => ({ ...f, unidadOperativaId: v || null }))} />
 
                 {proyectoSel ? (
                   <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800">
@@ -5316,7 +7021,7 @@ function VistaPresupuesto({ costos, setCostos, proyectos, operaciones, colaborad
 
       {viendoInformePresupuesto && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-          <div className="liq-print max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
+          <div ref={refInformePresupuesto} className="liq-print max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
             <div className="mb-4 border-b border-slate-200 pb-3 text-center">
               <p className="text-sm font-semibold text-slate-900">SUA &amp; SERVICE INGENIERÍA S.A.S.</p>
               <p className="text-xs text-slate-500">Informe de presupuesto de costos</p>
@@ -5355,6 +7060,7 @@ function VistaPresupuesto({ costos, setCostos, proyectos, operaciones, colaborad
 
             <div className="no-print mt-5 flex gap-2">
               <button onClick={() => window.print()} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white hover:bg-green-900"><FileDown size={14} /> PDF</button>
+              {onPdfInformeListo && <BotonSubirPdfOneDrive contenedorRef={refInformePresupuesto} onSubir={(blob) => onPdfInformeListo("Presupuesto", blob)} />}
               <button onClick={() => setViendoInformePresupuesto(false)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600"><X size={16} /></button>
             </div>
           </div>
@@ -5365,12 +7071,15 @@ function VistaPresupuesto({ costos, setCostos, proyectos, operaciones, colaborad
 }
 
 // ==================== PRESTACIONES SOCIALES ====================
-function VistaPrestaciones({ colaboradores, liquidaciones, registrarLiquidacion, actualizarColaborador, actualizarLiquidacion, eliminarLiquidacion, operaciones, irARegistrarNomina, nit, smmlv, auxilioTransporteLey, crearColaborador, soloLectura }) {
+function VistaPrestaciones({ colaboradores, liquidaciones, registrarLiquidacion, actualizarColaborador, eliminarColaborador, actualizarLiquidacion, eliminarLiquidacion, operaciones, irARegistrarNomina, nit, smmlv, auxilioTransporteLey, crearColaborador, soloLectura, onLiquidacionConfirmada, onPdfPrestacionListo }) {
+  const contenedorComprobanteRef = useRef(null); // el nodo del comprobante en pantalla — se usa para generar su PDF al confirmar
   const [colaboradorId, setColaboradorId] = useState("");
   const [tipo, setTipo] = useState("CESANTIAS");
   const [anioLiquidar, setAnioLiquidar] = useState(new Date(hoy()).getFullYear() - 1); // por defecto, el último año vencido — cesantías nunca se liquidan sobre el año en curso
   const [pagarAusenciaComoTrabajada, setPagarAusenciaComoTrabajada] = useState(false); // ajuste: la empresa decide pagar esos días de todas formas
   const [nuevoColaborador, setNuevoColaborador] = useState(null);
+  const [confirmandoEliminarColaborador, setConfirmandoEliminarColaborador] = useState(null);
+  const [mostrarListaColaboradores, setMostrarListaColaboradores] = useState(false);
   const [semestrePrima, setSemestrePrima] = useState(new Date(hoy()).getMonth() < 6 ? "2" : "1"); // el semestre vencido más reciente, no el que está en curso
   const [anioPrima, setAnioPrima] = useState(new Date(hoy()).getMonth() < 6 ? new Date(hoy()).getFullYear() - 1 : new Date(hoy()).getFullYear());
   const [fechaCorte, setFechaCorte] = useState(hoy());
@@ -5406,6 +7115,13 @@ function VistaPrestaciones({ colaboradores, liquidaciones, registrarLiquidacion,
     setTipoSalarioVacaciones("FIJO");
     setPagarAusenciaComoTrabajada(false);
     setPromedioSalarioVariableManual(0);
+    // Por defecto se ofrece el último año vencido — pero si el colaborador
+    // ingresó este año (después de que ese año anterior ya había cerrado),
+    // ese año anterior no existió para él: se ofrece el año en curso en su
+    // lugar (mostrará "año no vencido" hasta que cierre, que es lo
+    // correcto — nunca un período invertido con valores absurdos).
+    const anioActualDefecto = new Date(hoy()).getFullYear();
+    setAnioLiquidar(c && c.fechaIngreso > `${anioActualDefecto - 1}-12-31` ? anioActualDefecto : anioActualDefecto - 1);
   }
 
   // Última liquidación de vacaciones — sigue funcionando "desde la anterior",
@@ -5439,6 +7155,12 @@ function VistaPrestaciones({ colaboradores, liquidaciones, registrarLiquidacion,
       const anioVencido = finAnio < hoy();
       if (!anioVencido) {
         return { tipoCalculado: "CESANTIAS", noVencido: true, finAnio };
+      }
+      if (col.fechaIngreso > finAnio) {
+        // El colaborador ingresó después de que este año ya había cerrado —
+        // no hay período que liquidar aquí (evita un rango invertido con
+        // "desde" posterior a "hasta", que daría un valor absurdo).
+        return { tipoCalculado: "CESANTIAS", noVencido: true, finAnio, aunNoIngresaba: true };
       }
       const desde = col.fechaIngreso > inicioAnio ? col.fechaIngreso : inicioAnio;
       const esNuevo = col.fechaIngreso > inicioAnio;
@@ -5517,6 +7239,11 @@ function VistaPrestaciones({ colaboradores, liquidaciones, registrarLiquidacion,
       const semestreVencido = inicioMesPago <= hoy();
       if (!semestreVencido) {
         return { tipoCalculado: "PRIMA", noVencido: true, finSemestre, plazoMaximoPago, inicioMesPago };
+      }
+      if (col.fechaIngreso > finSemestre) {
+        // Mismo caso que cesantías: el colaborador ingresó después de que
+        // este semestre ya había cerrado — no hay período que liquidar.
+        return { tipoCalculado: "PRIMA", noVencido: true, finSemestre, plazoMaximoPago, inicioMesPago, aunNoIngresaba: true };
       }
       const desde = col.fechaIngreso > inicioSemestre ? col.fechaIngreso : inicioSemestre;
       const diasCalendario = diasComercialesEntre(desde, finSemestre) + 1; // +1: mismo criterio que cesantías, rango inclusive
@@ -5906,6 +7633,10 @@ function VistaPrestaciones({ colaboradores, liquidaciones, registrarLiquidacion,
 
   function construirLiquidacion() {
     if (!col || !editable || !calculo) return null;
+    if (pagarAhora && !cuentaId) {
+      alert('Marcaste "Registrar el pago en tesorería al confirmar" pero no elegiste una cuenta de pago — sin eso, el pago no queda registrado en Registro ni se refleja en Caja y bancos. Elige una cuenta, o desmarca la casilla si solo quieres causar la liquidación sin pagarla todavía.');
+      return null;
+    }
     const vd = vacacionesDerivadas();
     const base = { id: editandoId || undefined, colaboradorId, colaboradorNombre: col.nombre, tipo, pagarAhora, cuentaId, valorPagado: valorAPagar() };
 
@@ -5974,18 +7705,48 @@ function VistaPrestaciones({ colaboradores, liquidaciones, registrarLiquidacion,
     setPeriodosEnCola((p) => p.filter((x) => x._key !== key));
   }
 
-  function confirmarLiquidacion() {
+  function filaPrestacionParaSincronizar(liq) {
+    if (liq.tipo === "CESANTIAS") {
+      const dias = liq.fechaInicio && liq.fechaCorte ? Math.round((new Date(liq.fechaCorte) - new Date(liq.fechaInicio)) / 86400000) : "";
+      return { tipo: "CESANTIAS", valores: [liq.colaboradorNombre, liq.anioLiquidado, dias, liq.salarioUsado, liq.cesantias, liq.intereses] };
+    }
+    if (liq.tipo === "PRIMA") {
+      return { tipo: "PRIMA", valores: [liq.colaboradorNombre, `${liq.semestrePrima}S-${liq.anioPrima}`, liq.diasPrima, liq.salarioUsado, liq.prima] };
+    }
+    if (liq.tipo === "LIQUIDACION_FINAL") {
+      return { tipo: "LIQUIDACION_FINAL", valores: [liq.colaboradorNombre, liq.fechaTerminacion, liq.cesantias, liq.intereses, liq.prima, liq.vacacionesPendientes, 0, liq.valorPagado] };
+    }
+    // VACACIONES
+    return { tipo: "VACACIONES", valores: [liq.colaboradorNombre, liq.fechaCorte, liq.vacacionesDiasDisfrutados, liq.vacacionesDiasCompensados, liq.vacacionesValor] };
+  }
+
+  async function confirmarLiquidacion() {
     const liq = construirLiquidacion();
     if (!liq) return;
     if (editandoId) {
       actualizarLiquidacion(editandoId, liq);
     } else if (periodosEnCola.length > 0) {
       // Registra todos los períodos encolados, más el que está en el formulario ahora
-      periodosEnCola.forEach((p) => { const { _key, ...limpio } = p; registrarLiquidacion(limpio); });
+      periodosEnCola.forEach((p) => { const { _key, ...limpio } = p; registrarLiquidacion(limpio); onLiquidacionConfirmada?.(filaPrestacionParaSincronizar(limpio)); });
       registrarLiquidacion(liq);
+      onLiquidacionConfirmada?.(filaPrestacionParaSincronizar(liq));
       setPeriodosEnCola([]);
     } else {
       registrarLiquidacion(liq);
+      onLiquidacionConfirmada?.(filaPrestacionParaSincronizar(liq));
+    }
+    // El comprobante en PDF se genera ANTES de cerrar la vista previa —
+    // porque es justo ese elemento (contenedorComprobanteRef) el que se
+    // convierte en PDF. Se espera a que termine de capturarlo para no
+    // cerrar el modal a la mitad, pero la subida a OneDrive en sí no
+    // bloquea ni puede tumbar el registro ya guardado si falla.
+    if (onPdfPrestacionListo && contenedorComprobanteRef.current) {
+      try {
+        const blob = await generarPdfDesdeElemento(contenedorComprobanteRef.current);
+        onPdfPrestacionListo(tipo, liq, blob);
+      } catch (error) {
+        console.error("[PDF] No se pudo generar el comprobante de prestación:", error);
+      }
     }
     limpiarFormulario();
   }
@@ -6001,14 +7762,20 @@ function VistaPrestaciones({ colaboradores, liquidaciones, registrarLiquidacion,
 
   function guardarColaboradorNuevo() {
     if (!nuevoColaborador.nombre || !nuevoColaborador.salario) return;
-    const id = crearColaborador({
+    const datos = {
       nombre: nuevoColaborador.nombre, documento: nuevoColaborador.documento, cargo: nuevoColaborador.cargo,
       salario: Number(nuevoColaborador.salario), eps: nuevoColaborador.eps, fondoPension: nuevoColaborador.fondoPension, fondoCesantias: nuevoColaborador.fondoCesantias,
       claseContrato: nuevoColaborador.claseContrato || "Término indefinido",
       aplicaPension: nuevoColaborador.aplicaPension, motivoExencionPension: nuevoColaborador.motivoExencionPension || null, fechaIngreso: nuevoColaborador.fechaIngreso || hoy(),
       ultimoPeriodoVacacionesPagado: nuevoColaborador.ultimoPeriodoVacacionesPagado || null,
       claseRiesgoArl: nuevoColaborador.claseRiesgoArl || "I",
-    });
+    };
+    if (nuevoColaborador.id) {
+      actualizarColaborador(nuevoColaborador.id, datos);
+      setNuevoColaborador(null);
+      return;
+    }
+    const id = crearColaborador(datos);
     seleccionarColaborador(id);
     setNuevoColaborador(null);
   }
@@ -6077,24 +7844,43 @@ function VistaPrestaciones({ colaboradores, liquidaciones, registrarLiquidacion,
                     <button onClick={limpiarFormulario} className="font-medium underline">Cancelar</button>
                   </div>
                 </div>
-              ) : (
+              ) : (() => {
+                const pagoVinculado = operaciones.find((o) => o.liquidacionId === editandoId);
+                return (
                 <div className="flex items-center justify-between">
-                  <span className="font-medium text-rose-700">¿Seguro? Esta acción no se puede deshacer, y no ajusta ningún pago ya registrado en tesorería.</span>
+                  <span className="font-medium text-rose-700">
+                    ¿Seguro? Esta acción no se puede deshacer.
+                    {pagoVinculado && ` Esta liquidación tiene un pago vinculado de $ ${pagoVinculado.valor.toLocaleString("es-CO")} en Registro — ¿lo eliminas también, o lo dejas ahí?`}
+                  </span>
                   <div className="flex shrink-0 items-center gap-3">
-                    <button
-                      onClick={() => {
-                        eliminarLiquidacion(editandoId);
-                        setConfirmandoEliminar(false);
-                        limpiarFormulario();
-                      }}
-                      className="rounded bg-rose-600 px-2 py-1 font-medium text-white"
-                    >
-                      Sí, eliminar
-                    </button>
+                    {pagoVinculado ? (
+                      <>
+                        <button
+                          onClick={() => { eliminarLiquidacion(editandoId, true); setConfirmandoEliminar(false); limpiarFormulario(); }}
+                          className="rounded bg-rose-600 px-2 py-1 font-medium text-white"
+                        >
+                          Eliminar ambos
+                        </button>
+                        <button
+                          onClick={() => { eliminarLiquidacion(editandoId, false); setConfirmandoEliminar(false); limpiarFormulario(); }}
+                          className="rounded border border-rose-300 px-2 py-1 font-medium text-rose-700"
+                        >
+                          Solo la liquidación
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={() => { eliminarLiquidacion(editandoId, false); setConfirmandoEliminar(false); limpiarFormulario(); }}
+                        className="rounded bg-rose-600 px-2 py-1 font-medium text-white"
+                      >
+                        Sí, eliminar
+                      </button>
+                    )}
                     <button onClick={() => setConfirmandoEliminar(false)} className="font-medium underline">No</button>
                   </div>
                 </div>
-              )}
+                );
+              })()}
             </div>
           )}
           <div>
@@ -6113,6 +7899,29 @@ function VistaPrestaciones({ colaboradores, liquidaciones, registrarLiquidacion,
             <Selector label="Colaborador" opciones={colaboradores} valor={colaboradorId} onChange={seleccionarColaborador} />
             <button onClick={() => setNuevoColaborador({ nombre: "", documento: "", cargo: "", salario: "", eps: "", fondoPension: "", fondoCesantias: "", aplicaPension: true, fechaIngreso: "", claseContrato: "Término indefinido" })} disabled={soloLectura} className="absolute right-0 top-0 text-[11px] font-medium text-green-700 hover:underline disabled:opacity-40 disabled:no-underline">+ Nuevo colaborador</button>
           </div>
+          <button onClick={() => setMostrarListaColaboradores((v) => !v)} className="text-[11px] font-medium text-slate-500 hover:underline">
+            {mostrarListaColaboradores ? "Ocultar" : "Ver"} todos los colaboradores ({colaboradores.length})
+          </button>
+          {mostrarListaColaboradores && (
+            <div className="space-y-1.5 rounded-lg border border-slate-200 bg-white p-3">
+              {colaboradores.length === 0 && <p className="text-xs text-slate-400">Sin colaboradores registrados todavía.</p>}
+              {colaboradores.map((c) => (
+                <div key={c.id} className="flex items-center justify-between rounded-lg border border-slate-100 px-3 py-2 text-xs">
+                  <div>
+                    <p className="font-medium text-slate-700">{c.nombre}</p>
+                    <p className="text-slate-500">{c.cargo || "sin cargo registrado"} · {c.documento || "sin documento"}</p>
+                  </div>
+                  <button
+                    onClick={() => setNuevoColaborador({ ...c, salario: String(c.salario ?? "") })}
+                    disabled={soloLectura}
+                    className="rounded border border-slate-300 px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                  >
+                    Editar
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           {col && (
             <>
               <div className="rounded-lg bg-slate-50 p-3 text-[11px] text-slate-600">
@@ -6323,8 +8132,17 @@ function VistaPrestaciones({ colaboradores, liquidaciones, registrarLiquidacion,
                 <input type="checkbox" id="pagarAhora" checked={pagarAhora} onChange={(e) => setPagarAhora(e.target.checked)} />
                 <label htmlFor="pagarAhora" className="text-xs text-slate-600">Registrar el pago en tesorería al confirmar</label>
               </div>
+              {pagarAhora && !cuentaId && (
+                <p className="text-[11px] text-amber-600">Elige una cuenta arriba — si no, esta liquidación se guardará marcada como "pagada" pero sin ningún pago real en Registro ni en Caja y bancos.</p>
+              )}
 
-              {calculo && calculo.noVencido && (
+              {calculo && calculo.noVencido && calculo.aunNoIngresaba && (
+                <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
+                  <p className="font-semibold">{col?.nombre || "El colaborador"} ingresó el {col?.fechaIngreso} — después de que cerrara este {tipo === "CESANTIAS" ? "año" : "semestre"}.</p>
+                  <p className="mt-1">No hay {tipo === "CESANTIAS" ? "cesantías" : "prima"} que liquidar en un período anterior a su fecha de ingreso. Elige el año en que ingresó (o uno posterior, ya vencido).</p>
+                </div>
+              )}
+              {calculo && calculo.noVencido && !calculo.aunNoIngresaba && (
                 <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
                   <p className="font-semibold">Este {tipo === "CESANTIAS" ? "año" : "semestre"} todavía no está vencido — no se puede liquidar.</p>
                   <p className="mt-1">
@@ -6550,7 +8368,7 @@ function VistaPrestaciones({ colaboradores, liquidaciones, registrarLiquidacion,
             }
           `}</style>
           <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-900/50 p-4">
-            <div className="liq-print max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
+            <div ref={contenedorComprobanteRef} className="liq-print max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
               <p className="no-print mb-3 rounded bg-amber-50 px-2 py-1 text-center text-[11px] font-medium text-amber-700">Vista previa — {editandoId ? "corrigiendo un registro existente" : "aún no se ha registrado"}</p>
               <div className="mb-4 border-b border-slate-200 pb-3 text-center">
                 <p className="text-sm font-semibold text-slate-900">SUA &amp; SERVICE INGENIERÍA S.A.S.</p>
@@ -6697,7 +8515,7 @@ function VistaPrestaciones({ colaboradores, liquidaciones, registrarLiquidacion,
       {nuevoColaborador && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
           <div className="w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-xl bg-white p-5">
-            <div className="mb-4 flex items-center justify-between"><p className="text-sm font-semibold">Nuevo colaborador</p><button onClick={() => setNuevoColaborador(null)}><X size={18} /></button></div>
+            <div className="mb-4 flex items-center justify-between"><p className="text-sm font-semibold">{nuevoColaborador.id ? "Editar colaborador" : "Nuevo colaborador"}</p><button onClick={() => setNuevoColaborador(null)}><X size={18} /></button></div>
             <div className="space-y-3">
               <div><label className={labelCls}>Nombre completo</label><input className={inputCls} value={nuevoColaborador.nombre} onChange={(e) => setNuevoColaborador((f) => ({ ...f, nombre: e.target.value }))} /></div>
               <div><label className={labelCls}>Identificación</label><input className={inputCls} value={nuevoColaborador.documento} onChange={(e) => setNuevoColaborador((f) => ({ ...f, documento: e.target.value }))} /></div>
@@ -6738,6 +8556,19 @@ function VistaPrestaciones({ colaboradores, liquidaciones, registrarLiquidacion,
                 <p className="mt-1 text-[10px] text-slate-500">Según la labor real que desempeña, no la actividad general de la empresa (Decreto 1607 de 2002).</p>
               </div>
               <button onClick={guardarColaboradorNuevo} className="w-full rounded-lg bg-green-700 px-4 py-2.5 text-sm font-medium text-white">Guardar</button>
+              {nuevoColaborador.id && (
+                confirmandoEliminarColaborador === nuevoColaborador.id ? (
+                  <div className="flex items-center justify-between rounded-lg bg-rose-50 px-3 py-2 text-xs">
+                    <span className="font-medium text-rose-700">¿Eliminar a {nuevoColaborador.nombre}? No borra su historial de nómina ni liquidaciones ya registradas.</span>
+                    <div className="flex shrink-0 gap-2">
+                      <button onClick={() => { eliminarColaborador(nuevoColaborador.id); setConfirmandoEliminarColaborador(null); setNuevoColaborador(null); }} className="rounded bg-rose-600 px-2 py-1 font-medium text-white">Sí</button>
+                      <button onClick={() => setConfirmandoEliminarColaborador(null)} className="font-medium underline">No</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button onClick={() => setConfirmandoEliminarColaborador(nuevoColaborador.id)} className="w-full rounded-lg border border-rose-300 px-4 py-2 text-sm font-medium text-rose-600 hover:bg-rose-50">Eliminar colaborador</button>
+                )
+              )}
             </div>
           </div>
         </div>
@@ -6747,8 +8578,9 @@ function VistaPrestaciones({ colaboradores, liquidaciones, registrarLiquidacion,
 }
 
 // ==================== PRODUCCIÓN (resumen) ====================
-function VistaProduccion({ materiasPrimas, setMateriasPrimas, productosTerminados, setProductosTerminados, listaMateriales, setListaMateriales, ordenesProduccion, setOrdenesProduccion, operaciones, proyectos, proveedor, actualizarOperacion, registrarOperacion, proveedores, crearProveedor, costosPorOrden, soloLectura }) {
+function VistaProduccion({ materiasPrimas, crearMateriaPrimaEnBD, productosTerminados, crearProductoTerminadoEnBD, listaMateriales, crearLineaListaMaterialesEnBD, ordenesProduccion, crearOrdenProduccionEnBD, actualizarOrdenProduccionEnBD, operaciones, proyectos, proveedor, actualizarOperacion, registrarOperacion, proveedores, crearProveedor, costosPorOrden, soloLectura, onPdfInformeListo }) {
   const [tab, setTab] = useState("materiales");
+  const refInformeOrden = useRef(null);
   const [nuevaMP, setNuevaMP] = useState(null);
   const [nuevoPT, setNuevoPT] = useState(null);
   const [nuevaLinea, setNuevaLinea] = useState(null);
@@ -6868,18 +8700,18 @@ function VistaProduccion({ materiasPrimas, setMateriasPrimas, productosTerminado
 
   function guardarMateriaPrima() {
     if (!nuevaMP.nombre || !nuevaMP.costo) return;
-    setMateriasPrimas((ms) => [...ms, { id: `mp${Date.now()}`, nombre: nuevaMP.nombre, unidad: nuevaMP.unidad || "und", costo: Number(nuevaMP.costo), operacionReferenciaId: nuevaMP.operacionReferenciaId || null }]);
+    crearMateriaPrimaEnBD({ id: `mp${Date.now()}`, nombre: nuevaMP.nombre, unidad: nuevaMP.unidad || "und", costo: Number(nuevaMP.costo), operacionReferenciaId: nuevaMP.operacionReferenciaId || null });
     setNuevaMP(null);
   }
 
   function guardarProductoTerminado() {
     if (!nuevoPT.nombre) return;
-    setProductosTerminados((ps) => [...ps, { id: `pt${Date.now()}`, nombre: nuevoPT.nombre, unidad: nuevoPT.unidad || "und" }]);
+    crearProductoTerminadoEnBD({ id: `pt${Date.now()}`, nombre: nuevoPT.nombre, unidad: nuevoPT.unidad || "und" });
     setNuevoPT(null);
   }
 
   function actualizarOrden() {
-    setOrdenesProduccion((os) => os.map((o) => (o.id === editandoOrden.id ? { ...editandoOrden, cantidadPlaneada: Number(editandoOrden.cantidadPlaneada), horasCnc: Number(editandoOrden.horasCnc) || 0 } : o)));
+    actualizarOrdenProduccionEnBD(editandoOrden.id, { ...editandoOrden, cantidadPlaneada: Number(editandoOrden.cantidadPlaneada), horasCnc: Number(editandoOrden.horasCnc) || 0 });
     setEditandoOrden(null);
   }
 
@@ -6891,21 +8723,18 @@ function VistaProduccion({ materiasPrimas, setMateriasPrimas, productosTerminado
 
   function guardarLineaReceta() {
     if (!nuevaLinea.materiaPrimaId || !nuevaLinea.cantidadPorUnidad) return;
-    setListaMateriales((ls) => [...ls, { productoTerminadoId: nuevaLinea.productoTerminadoId, materiaPrimaId: nuevaLinea.materiaPrimaId, cantidadPorUnidad: Number(nuevaLinea.cantidadPorUnidad) }]);
+    crearLineaListaMaterialesEnBD({ productoTerminadoId: nuevaLinea.productoTerminadoId, materiaPrimaId: nuevaLinea.materiaPrimaId, cantidadPorUnidad: Number(nuevaLinea.cantidadPorUnidad) });
     setNuevaLinea(null);
   }
 
   function crearOrden() {
     if (!nuevaOrden.productoTerminadoId || !nuevaOrden.cantidadPlaneada) return;
-    setOrdenesProduccion((os) => [
-      { id: `OP-${String(os.length + 1).padStart(3, "0")}`, productoTerminadoId: nuevaOrden.productoTerminadoId, cantidadPlaneada: Number(nuevaOrden.cantidadPlaneada), cantidadProducida: 0, horasCnc: Number(nuevaOrden.horasCnc) || 0, estado: "PLANEADA", unidadOperativaId: nuevaOrden.unidadOperativaId || null },
-      ...os,
-    ]);
+    crearOrdenProduccionEnBD({ id: `OP-${Date.now()}`, productoTerminadoId: nuevaOrden.productoTerminadoId, cantidadPlaneada: Number(nuevaOrden.cantidadPlaneada), cantidadProducida: 0, horasCnc: Number(nuevaOrden.horasCnc) || 0, estado: "PLANEADA", unidadOperativaId: nuevaOrden.unidadOperativaId || null });
     setNuevaOrden(null);
   }
 
   function completarOrden(id, cantidadProducida) {
-    setOrdenesProduccion((os) => os.map((o) => (o.id === id ? { ...o, estado: "TERMINADA", cantidadProducida: Number(cantidadProducida) } : o)));
+    actualizarOrdenProduccionEnBD(id, { estado: "TERMINADA", cantidadProducida: Number(cantidadProducida) });
     setCompletando(null);
   }
 
@@ -7394,7 +9223,7 @@ function VistaProduccion({ materiasPrimas, setMateriasPrimas, productosTerminado
             const proyectoNombre = proyectos.find((p) => p.id === orden.unidadOperativaId)?.nombre;
             return (
               <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-                <div className="liq-print max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
+                <div ref={refInformeOrden} className="liq-print max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
                   <div className="mb-4 border-b border-slate-200 pb-3 text-center">
                     <p className="text-sm font-semibold text-slate-900">SUA &amp; SERVICE INGENIERÍA S.A.S.</p>
                     <p className="text-xs text-slate-500">Informe de producción</p>
@@ -7418,6 +9247,7 @@ function VistaProduccion({ materiasPrimas, setMateriasPrimas, productosTerminado
                   <p className="mt-1 text-[11px] text-slate-500">Costo real por {pt?.unidad || "unidad"}: <span className="font-semibold">{fmt(costoUnitarioReal)}</span></p>
                   <div className="no-print mt-5 flex gap-2">
                     <button onClick={() => window.print()} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white hover:bg-green-900"><FileDown size={14} /> PDF</button>
+                    {onPdfInformeListo && <BotonSubirPdfOneDrive contenedorRef={refInformeOrden} onSubir={(blob) => onPdfInformeListo(`Produccion_Orden_${orden.id}`, blob)} />}
                     <button onClick={() => setViendoInformeOrden(null)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600"><X size={16} /></button>
                   </div>
                 </div>
@@ -7431,11 +9261,12 @@ function VistaProduccion({ materiasPrimas, setMateriasPrimas, productosTerminado
 }
 
 // ==================== DASHBOARD ====================
-function VistaDashboard({ resumen, carteraPorCliente, cxpPorProveedor, provisionPrestaciones, liquidacionesPendientes, movimientosCaja, proyectos, operaciones, cliente, cuenta, distribucionGastosGenerales, pctGastosProyectos, pctGastosProduccion, pendientesPorAsignarMes, cotizacionesSinFacturar, ordenesProduccion, productosTerminados, actualizarOperacion, colaboradores, soloLectura }) {
+function VistaDashboard({ resumen, carteraPorCliente, cxpPorProveedor, provisionPrestaciones, liquidacionesPendientes, movimientosCaja, proyectos, operaciones, cliente, cuenta, distribucionGastosGenerales, pctGastosProyectos, pctGastosProduccion, pendientesPorAsignarMes, cotizacionesSinFacturar, ordenesProduccion, productosTerminados, actualizarOperacion, colaboradores, soloLectura, onPdfInformeListo }) {
   const [panel, setPanel] = useState(null); // 'caja' | 'cartera' | 'cxp' | null
   const [viendoPendientes, setViendoPendientes] = useState(false);
   const [asignandoRapido, setAsignandoRapido] = useState(null); // { id, destino: "proyecto"|"orden", valor } — item que se está asignando
   const [viendoInformeMando, setViendoInformeMando] = useState(false);
+  const refInformeMando = useRef(null);
 
   function confirmarAsignacionRapida(destinoId, esOrden) {
     if (!asignandoRapido || !destinoId) return;
@@ -7675,7 +9506,7 @@ function VistaDashboard({ resumen, carteraPorCliente, cxpPorProveedor, provision
                 <label className="mb-1 block text-xs font-medium text-slate-600">A un proyecto</label>
                 <select className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm" defaultValue="" onChange={(e) => e.target.value && confirmarAsignacionRapida(e.target.value, false)}>
                   <option value="">Seleccionar proyecto…</option>
-                  {proyectos.map((p) => <option key={p.id} value={p.id}>{p.nombre}</option>)}
+                  {proyectos.filter((p) => p.estado !== "CANCELADA").map((p) => <option key={p.id} value={p.id}>{p.nombre}</option>)}
                 </select>
               </div>
               {ordenesProduccion.length > 0 && (
@@ -7694,7 +9525,7 @@ function VistaDashboard({ resumen, carteraPorCliente, cxpPorProveedor, provision
 
       {viendoInformeMando && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-          <div className="liq-print max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
+          <div ref={refInformeMando} className="liq-print max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
             <div className="mb-4 border-b border-slate-200 pb-3 text-center">
               <p className="text-sm font-semibold text-slate-900">SUA &amp; SERVICE INGENIERÍA S.A.S.</p>
               <p className="text-xs text-slate-500">Informe de control de mando</p>
@@ -7728,6 +9559,7 @@ function VistaDashboard({ resumen, carteraPorCliente, cxpPorProveedor, provision
 
             <div className="no-print mt-5 flex gap-2">
               <button onClick={() => window.print()} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white hover:bg-green-900"><FileDown size={14} /> PDF</button>
+              {onPdfInformeListo && <BotonSubirPdfOneDrive contenedorRef={refInformeMando} onSubir={(blob) => onPdfInformeListo("ControlDeMando", blob)} />}
               <button onClick={() => setViendoInformeMando(false)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600"><X size={16} /></button>
             </div>
           </div>
@@ -7739,8 +9571,9 @@ function VistaDashboard({ resumen, carteraPorCliente, cxpPorProveedor, provision
 
 // ==================== CALENDARIO TRIBUTARIO ====================
 // ==================== INDICADORES FINANCIEROS ====================
-function VistaIndicadores({ indicadores, carteraPorCliente, cxpPorProveedor, distribucionGastosGenerales, pctGastosProyectos, pctGastosProduccion, pendientesPorAsignarMes }) {
+function VistaIndicadores({ indicadores, carteraPorCliente, cxpPorProveedor, distribucionGastosGenerales, pctGastosProyectos, pctGastosProduccion, pendientesPorAsignarMes, onPdfInformeListo }) {
   const [viendoInforme, setViendoInforme] = useState(false);
+  const refInformeIndicadores = useRef(null);
   const totalCartera = carteraPorCliente.reduce((s, g) => s + g.total, 0);
   const totalCxp = cxpPorProveedor.reduce((s, g) => s + g.total, 0);
   const concentracionClientes = carteraPorCliente.map((g) => ({ nombre: g.nombre, pct: totalCartera ? (g.total / totalCartera) * 100 : 0 }));
@@ -7839,7 +9672,7 @@ function VistaIndicadores({ indicadores, carteraPorCliente, cxpPorProveedor, dis
 
       {viendoInforme && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-          <div className="liq-print max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
+          <div ref={refInformeIndicadores} className="liq-print max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-6 shadow-2xl">
             <div className="mb-4 border-b border-slate-200 pb-3 text-center">
               <p className="text-sm font-semibold text-slate-900">SUA &amp; SERVICE INGENIERÍA S.A.S.</p>
               <p className="text-xs text-slate-500">Informe de indicadores financieros y operativos</p>
@@ -7886,6 +9719,7 @@ function VistaIndicadores({ indicadores, carteraPorCliente, cxpPorProveedor, dis
 
             <div className="no-print mt-5 flex gap-2">
               <button onClick={() => window.print()} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white hover:bg-green-900"><FileDown size={14} /> PDF</button>
+              {onPdfInformeListo && <BotonSubirPdfOneDrive contenedorRef={refInformeIndicadores} onSubir={(blob) => onPdfInformeListo("Indicadores", blob)} />}
               <button onClick={() => setViendoInforme(false)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600"><X size={16} /></button>
             </div>
           </div>
@@ -8144,7 +9978,7 @@ function VistaCalendario({ nit, setNit, ivaPeriodicidad, setIvaPeriodicidad, umb
 }
 
 function EstadoBadge({ estado }) {
-  const map = { BORRADOR: "bg-slate-100 text-slate-600", ENVIADA: "bg-blue-50 text-blue-700", GANADA: "bg-emerald-50 text-emerald-700" };
+  const map = { BORRADOR: "bg-slate-100 text-slate-600", ENVIADA: "bg-blue-50 text-blue-700", GANADA: "bg-emerald-50 text-emerald-700", PERDIDA: "bg-rose-50 text-rose-700" };
   return <span className={`mt-1 inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${map[estado] || "bg-slate-100 text-slate-600"}`}>{estado}</span>;
 }
 

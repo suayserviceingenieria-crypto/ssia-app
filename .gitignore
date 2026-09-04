@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+.env
+.env.local
+vite.config.js.timestamp-*.mjs
+
+# Copias locales de los libros de Excel (datos reales de la empresa) —
+# viven en OneDrive, no en el repositorio de código.
+/Cartera_CxC.xlsx
+/Cotizaciones.xlsx
+/CuentasPorPagar.xlsx
+/Nomina.xlsx
+/Proyectos.xlsx
+/Registro_Operaciones.xlsx
+/Terceros.xlsx
+
+# Notas/reportes de sesiones de trabajo con Claude — no son parte de la app.
+/Claude outputs/

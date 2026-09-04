@@ -23,18 +23,23 @@ export const msalConfig = {
   auth: {
     clientId: CLIENT_ID,
     authority: `https://login.microsoftonline.com/${TENANT_ID}`,
-    // Debe coincidir EXACTO (mismo protocolo, dominio y puerto) con la URI
-    // de redirección tipo SPA que registraste en Azure. Si despliegas en
-    // varios dominios (ej. localhost para pruebas y tu dominio real en
-    // producción), registra AMBAS URIs en Azure — window.location.origin
-    // toma automáticamente la que corresponda en cada entorno.
-    redirectUri: window.location.origin,
-    postLogoutRedirectUri: window.location.origin,
+    // Debe coincidir EXACTO (protocolo, dominio, puerto Y RUTA) con la URI de
+    // redirección tipo SPA que registraste en Azure. window.location.origin
+    // por sí solo NO incluye la subcarpeta "/ssia-app/" donde vive la app en
+    // GitHub Pages — por eso se combina con import.meta.env.BASE_URL, que
+    // toma automáticamente el mismo "base" que configuramos en
+    // vite.config.js, tanto en local (npm run dev) como en producción.
+    redirectUri: window.location.origin + import.meta.env.BASE_URL,
+    postLogoutRedirectUri: window.location.origin + import.meta.env.BASE_URL,
   },
   cache: {
-    // sessionStorage, igual criterio que el login por clave: la conexión
-    // con Microsoft se cierra sola al cerrar la pestaña o el navegador.
-    cacheLocation: "sessionStorage",
+    // localStorage, no sessionStorage: así la conexión con Microsoft
+    // persiste entre sesiones (cerrar y volver a abrir el navegador) — el
+    // login diario por usuario/clave sigue cerrándose solo (sessionStorage,
+    // en utils/auth.js), pero la conexión con OneDrive necesita sobrevivir
+    // más tiempo para poder reconectarse en silencio sin pedirle a cada
+    // persona que la reconecte cada vez que abre la app.
+    cacheLocation: "localStorage",
     storeAuthStateInCookie: false,
   },
   system: {
@@ -57,7 +62,15 @@ export const msalConfig = {
 };
 
 // Permisos de Microsoft Graph que la app solicita. Deben coincidir con los
-// que habilitaste en Azure (Files.ReadWrite y Files.ReadWrite.All).
-export const graphScopes = ["Files.ReadWrite", "Files.ReadWrite.All"];
+// que habilitaste en Azure (Files.ReadWrite, Files.ReadWrite.All y ahora
+// también Calendars.ReadWrite, agregado para crear tareas de seguimiento
+// comercial como eventos reales en el Calendario de Microsoft 365 de
+// comercial@suaservice.com). Al agregar un scope nuevo, Azure Portal → tu
+// App registration → API permissions → Add a permission → Microsoft Graph
+// → Delegated permissions → Calendars.ReadWrite (y "Grant admin consent" si
+// tu organización lo exige) — y cada persona va a tener que volver a
+// conectar Microsoft una vez (reconectar/aceptar el nuevo permiso), no solo
+// seguir usando la sesión que ya tenía.
+export const graphScopes = ["Files.ReadWrite", "Files.ReadWrite.All", "Calendars.ReadWrite"];
 
 export const graphBaseUrl = "https://graph.microsoft.com/v1.0";

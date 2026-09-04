@@ -55,7 +55,7 @@ export async function verificarClave(claveIngresada, hashAlmacenado) {
 // soloLectura: true = puede ver todo pero no crear/editar/eliminar nada.
 export const ROLES = [
   { id: "ESTRATEGICA", label: "Gestión Estratégica", descripcion: "Acceso completo — Alta Dirección", modulos: null, soloLectura: false },
-  { id: "COMERCIAL", label: "Gestión Comercial", descripcion: "Cotizaciones y terceros", modulos: ["cotizaciones", "terceros"], soloLectura: false },
+  { id: "COMERCIAL", label: "Gestión Comercial", descripcion: "Cotizaciones y terceros", modulos: ["comercial"], soloLectura: false },
   { id: "EVALUACION", label: "Seguimiento y Evaluación", descripcion: "Ve todo, no edita — revisión gerencial", modulos: null, soloLectura: true },
 ];
 

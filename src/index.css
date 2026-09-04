@@ -1,3 +1,12 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Fuerza tamaño carta (Letter, 8.5in x 11in) en todos los PDF de la app
+   (cotizaciones, informes, comprobantes, etc.) — sin esto, el tamaño de
+   página dependía de la configuración de impresión de cada navegador,
+   que a veces sale en A4 en vez de carta. */
+@page {
+  size: letter;
+  margin: 1cm;
+}
