@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect, useRef } from "react";
 import { generarPdfDesdeElemento } from "./services/pdfGenerator";
 import { useMsal, useIsAuthenticated } from "@azure/msal-react";
 import { useColeccionSupabase, useConfiguracion } from "./supabase/useColeccionSupabase";
-import { ROLES, USUARIOS_SEMILLA, hashClave, guardarSesion, leerSesion, cerrarSesion, obtenerRol } from "./utils/auth";
+import { ROLES, USUARIOS_SEMILLA, generarHashClave, guardarSesion, leerSesion, cerrarSesion, obtenerRol } from "./utils/auth";
 import { supabase } from "./supabase/supabaseClient";
 import Login from "./components/Login";
 import ConexionMicrosoft, { AlertaConexionMicrosoft } from "./components/ConexionMicrosoft";
@@ -480,9 +480,10 @@ const NAV = [
 // seguimiento (numeral 9 de la norma — revisión, sin edición). "modulos:
 // null" significa acceso a todos; una lista significa solo esos, el resto
 // queda bloqueado con candado en el menú.
-// ROLES, USUARIOS_SEMILLA, hashClave, verificarClave, guardarSesion, leerSesion,
-// cerrarSesion y obtenerRol viven en src/utils/auth.js — ver ese archivo para
-// el esquema de hashing SHA-256 + sal y las credenciales iniciales de prueba.
+// ROLES, USUARIOS_SEMILLA, generarHashClave, verificarClave, guardarSesion,
+// leerSesion, cerrarSesion y obtenerRol viven en src/utils/auth.js — ver ese
+// archivo para el esquema de hashing SHA-256 + sal propia por usuario y las
+// credenciales iniciales de prueba.
 // El componente de login vive en src/components/Login.jsx.
 
 // ============================================================================
@@ -1164,13 +1165,13 @@ export default function AppCompleta() {
   // de tocar el estado, para que en memoria y en cualquier export/inspección
   // del estado de React nunca aparezca la clave real, solo su hash.
   async function crearUsuario({ clave, ...datos }) {
-    const passwordHash = await hashClave(clave);
+    const passwordHash = await generarHashClave(clave);
     const nuevo = { id: `u${Date.now()}`, ...datos, passwordHash };
     crearUsuarioEnBD(nuevo);
     return nuevo.id;
   }
   async function actualizarUsuario(id, { clave, ...cambios }) {
-    const passwordHash = clave ? await hashClave(clave) : undefined;
+    const passwordHash = clave ? await generarHashClave(clave) : undefined;
     actualizarUsuarioEnBD(id, { ...cambios, ...(passwordHash ? { passwordHash } : {}) });
 
     // Si la persona se está cambiando la clave A SÍ MISMA (con su sesión ya

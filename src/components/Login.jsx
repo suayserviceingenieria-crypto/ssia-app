@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { verificarClave, guardarSesion, sincronizarSesionSupabase } from "../utils/auth";
+import { verificarClave, guardarSesion, sincronizarSesionSupabase, migrarHashSiHaceFalta } from "../utils/auth";
 
 /**
  * Pantalla de login. Bloquea el resto de la interfaz hasta que haya una
@@ -48,6 +48,12 @@ export default function Login({ usuarios, onIngresar }) {
     // las políticas de seguridad de las tablas — ver la nota en utils/auth.js.
     // Nunca bloquea el login si falla: la persona entra a la app igual.
     await sincronizarSesionSupabase(usuarioNormalizado, clave);
+
+    // Si esta cuenta todavía tenía el hash del esquema anterior (sal fija
+    // compartida), lo reemplaza en silencio por uno con sal propia. No se
+    // espera (no bloquea el login) — la función ya maneja sus propios
+    // errores sin interrumpir nada.
+    migrarHashSiHaceFalta(encontrado.id, encontrado.passwordHash, clave);
 
     const sesion = guardarSesion(encontrado);
     onIngresar(sesion);

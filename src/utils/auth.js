@@ -19,35 +19,88 @@ import { supabase } from "../supabase/supabaseClient";
 // módulo debe reemplazarse por autenticación server-side de verdad.
 // ============================================================================
 
-// Sal fija. Cámbiala por una propia antes de desplegar a producción —
-// mientras más única sea, menos útil es cualquier tabla precalculada
-// genérica contra este archivo específico.
-const SALT = "SSIA-2026-x7Qz";
+// Sal fija ANTERIOR — ya NO se usa para claves nuevas. Se conserva solo
+// para poder seguir verificando (y migrar en silencio, ver
+// migrarHashSiHaceFalta más abajo) las claves que ya estaban guardadas
+// con el esquema viejo, de una sola sal compartida por todos.
+const SALT_LEGADA = "SSIA-2026-x7Qz";
 
 const SESSION_KEY = "ssia_sesion";
 
-/**
- * Calcula el hash SHA-256 de (sal + clave) usando la API nativa del
- * navegador (crypto.subtle) — no depende de ninguna librería externa.
- * @param {string} clave - la clave en texto plano a hashear
- * @returns {Promise<string>} el hash en hexadecimal (64 caracteres)
- */
-export async function hashClave(clave) {
-  const datos = new TextEncoder().encode(SALT + clave);
+/** SHA-256 de un texto, en hexadecimal — usando crypto.subtle nativo. */
+async function sha256Hex(texto) {
+  const datos = new TextEncoder().encode(texto);
   const bufferHash = await crypto.subtle.digest("SHA-256", datos);
   const bytes = Array.from(new Uint8Array(bufferHash));
   return bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** Hash con el esquema ANTERIOR (sal fija compartida) — solo para verificar claves ya guardadas así. */
+async function hashClaveLegado(clave) {
+  return sha256Hex(SALT_LEGADA + clave);
+}
+
+/** 16 bytes al azar, como texto hexadecimal (32 caracteres) — una sal distinta cada vez. */
+function generarSal() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /**
- * Compara una clave en texto plano contra un hash ya almacenado.
+ * Genera el hash de una clave con el esquema NUEVO: sal propia y
+ * aleatoria en cada llamada, guardada junto con el hash en un solo texto
+ * ("sal:hash"). Es lo que hay que usar para cualquier clave nueva o
+ * cambiada — nunca produce el mismo resultado dos veces, ni entre
+ * usuarios ni entre cambios de clave de la misma persona.
+ * @param {string} clave - la clave en texto plano a hashear
+ * @returns {Promise<string>} "sal:hash", listo para guardar en password_hash
+ */
+export async function generarHashClave(clave) {
+  const sal = generarSal();
+  const hash = await sha256Hex(sal + clave);
+  return `${sal}:${hash}`;
+}
+
+/**
+ * Compara una clave en texto plano contra un hash ya almacenado. Entiende
+ * los dos formatos que pueden existir en la base de datos: el nuevo
+ * ("sal:hash", una sal propia por clave) y el anterior (un solo hash con
+ * la sal fija compartida) — así ninguna clave que ya existía antes de
+ * este cambio deja de funcionar.
  * @param {string} claveIngresada - lo que la persona escribió en el login
  * @param {string} hashAlmacenado - el passwordHash guardado para ese usuario
  * @returns {Promise<boolean>}
  */
 export async function verificarClave(claveIngresada, hashAlmacenado) {
-  const hashCalculado = await hashClave(claveIngresada);
+  if (typeof hashAlmacenado === "string" && hashAlmacenado.includes(":")) {
+    const [sal, hash] = hashAlmacenado.split(":");
+    const hashCalculado = await sha256Hex(sal + claveIngresada);
+    return hashCalculado === hash;
+  }
+  const hashCalculado = await hashClaveLegado(claveIngresada);
   return hashCalculado === hashAlmacenado;
+}
+
+/**
+ * Si el hash guardado todavía usa el esquema anterior (sal fija
+ * compartida), lo reemplaza en Supabase por uno nuevo con sal propia —
+ * en silencio, la próxima vez que esa persona entra con su clave
+ * correcta. Si algo falla (ej. sin conexión) simplemente no migra nada
+ * todavía y se vuelve a intentar en el siguiente login — nunca interrumpe
+ * el ingreso a la app.
+ * @param {string} usuarioId - id del usuario en la tabla "usuarios"
+ * @param {string} hashActual - el passwordHash que ya tenía guardado
+ * @param {string} claveEnTextoPlano - la clave que la persona acaba de escribir (ya verificada)
+ */
+export async function migrarHashSiHaceFalta(usuarioId, hashActual, claveEnTextoPlano) {
+  if (typeof hashActual === "string" && hashActual.includes(":")) return; // ya está en el esquema nuevo
+  try {
+    const nuevoHash = await generarHashClave(claveEnTextoPlano);
+    const { error } = await supabase.from("usuarios").update({ password_hash: nuevoHash }).eq("id", usuarioId);
+    if (error) console.error("[Seguridad] No se pudo migrar el hash de la clave a sal propia:", error);
+  } catch (e) {
+    console.error("[Seguridad] No se pudo migrar el hash de la clave a sal propia:", e);
+  }
 }
 
 // ============================================================================
@@ -78,17 +131,17 @@ export const ROLES = [
 //
 //   Usuario: admin  / Clave: Admin2026*  (Gestión Estratégica)
 //
-// Su hash (ya calculado con la sal de arriba, SHA-256(sal + clave)):
+// Su hash (calculado con el esquema anterior, de sal fija — se migra solo
+// a sal propia la primera vez que ese usuario inicia sesión):
 //   admin -> 0990b24ea4538900510ee09c04241ab5c6670e63123d09dc68b354796ee644f5
 //
 // Con esta única cuenta, Gestión Estratégica crea desde la app al resto del
 // equipo (comerciales, seguimiento y evaluación) — no hace falta dejar más
 // usuarios de ejemplo aquí en el código.
 //
-// Si cambias la sal (SALT arriba), este hash ya NO sirve — tendrías que
-// recalcularlo. Puedes recalcular cualquier hash abriendo la consola del
-// navegador (F12) y ejecutando, por ejemplo:
-//   await hashClave("TuClaveNueva*")
+// Para recalcular un hash a mano (esquema nuevo, con sal propia), abre la
+// consola del navegador (F12) y ejecuta, por ejemplo:
+//   await generarHashClave("TuClaveNueva*")
 // (con este módulo importado en el contexto, o pegando la función completa).
 // ----------------------------------------------------------------------
 export const USUARIOS_SEMILLA = [
