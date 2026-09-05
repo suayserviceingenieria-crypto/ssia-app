@@ -3,6 +3,7 @@ import { generarPdfDesdeElemento } from "./services/pdfGenerator";
 import { useMsal, useIsAuthenticated } from "@azure/msal-react";
 import { useColeccionSupabase, useConfiguracion } from "./supabase/useColeccionSupabase";
 import { ROLES, USUARIOS_SEMILLA, hashClave, guardarSesion, leerSesion, cerrarSesion, obtenerRol } from "./utils/auth";
+import { supabase } from "./supabase/supabaseClient";
 import Login from "./components/Login";
 import ConexionMicrosoft, { AlertaConexionMicrosoft } from "./components/ConexionMicrosoft";
 import * as GraphSync from "./services/graphExcelService";
@@ -1171,6 +1172,21 @@ export default function AppCompleta() {
   async function actualizarUsuario(id, { clave, ...cambios }) {
     const passwordHash = clave ? await hashClave(clave) : undefined;
     actualizarUsuarioEnBD(id, { ...cambios, ...(passwordHash ? { passwordHash } : {}) });
+
+    // Si la persona se está cambiando la clave A SÍ MISMA (con su sesión ya
+    // abierta), aprovechamos para actualizar también su sesión real de
+    // Supabase — así el próximo login no se desincroniza.
+    // NOTA: si un administrador le resetea la clave a OTRA persona desde
+    // aquí, esto NO alcanza a actualizar la sesión de Supabase de esa otra
+    // persona (no hay backend propio para eso todavía). Mientras tanto, el
+    // arreglo manual es: en el panel de Supabase → Authentication → Users,
+    // borrar la cuenta de esa persona (correo "usuario@ssia.local") — en su
+    // siguiente login, sincronizarSesionSupabase() se la vuelve a crear ya
+    // con la clave nueva.
+    if (clave && id === sesion?.id) {
+      const { error } = await supabase.auth.updateUser({ password: clave });
+      if (error) console.error("[Supabase Auth] No se pudo sincronizar la nueva clave:", error);
+    }
   }
   function eliminarUsuario(id) {
     if (id === sesion?.id) return; // no te puedes borrar a ti mismo mientras tienes la sesión abierta

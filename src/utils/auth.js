@@ -1,3 +1,5 @@
+import { supabase } from "../supabase/supabaseClient";
+
 // ============================================================================
 // AUTENTICACIÓN — S&S IA
 // ============================================================================
@@ -131,12 +133,45 @@ export function leerSesion() {
   }
 }
 
-/** Cierra la sesión (logout). */
+/** Cierra la sesión (logout) — también cierra la sesión real de Supabase. */
 export function cerrarSesion() {
   sessionStorage.removeItem(SESSION_KEY);
+  supabase.auth.signOut().catch(() => {}); // best-effort, no bloquea el logout
 }
 
 /** Devuelve el objeto de rol completo (con permisos) para un rolId dado. */
 export function obtenerRol(rolId) {
   return ROLES.find((r) => r.id === rolId) ?? null;
+}
+
+// ============================================================================
+// SESIÓN REAL EN SUPABASE — para que Row Level Security pueda exigir
+// "authenticated" en vez de dejar las tablas abiertas a cualquiera
+// ============================================================================
+// El login de arriba (usuario/clave + SHA-256) sigue siendo el que decide
+// si la persona entra a la app — esto NO lo reemplaza. Es un paso adicional:
+// usa la misma clave que la persona ya escribió para abrir (o crear, la
+// primera vez que entra después de este cambio) una sesión real de
+// Supabase Auth, mapeando "usuario" a un correo interno ficticio
+// ("usuario@ssia.local") que nunca se usa para enviar nada — Supabase Auth
+// simplemente lo exige como formato.
+//
+// Si falla, la persona IGUAL entra a la app con normalidad (nunca bloquea
+// el login) — pero sus lecturas/escrituras a Supabase fallarán una vez
+// actives RLS "authenticated" en las tablas, hasta resolver el caso (ver
+// la nota junto a actualizarUsuario en App.jsx para cuando un administrador
+// le resetea la clave a otra persona).
+export async function sincronizarSesionSupabase(usuario, clave) {
+  const correo = `${usuario}@ssia.local`;
+
+  const { error: errorIngreso } = await supabase.auth.signInWithPassword({ email: correo, password: clave });
+  if (!errorIngreso) return { ok: true };
+
+  // No existe todavía la cuenta de Supabase Auth para este usuario (primera
+  // vez que entra tras este cambio) — la creamos ahora, con esta misma clave.
+  const { error: errorRegistro } = await supabase.auth.signUp({ email: correo, password: clave });
+  if (!errorRegistro) return { ok: true };
+
+  console.error("[Supabase Auth] No se pudo abrir/crear la sesión real:", errorRegistro || errorIngreso);
+  return { ok: false, error: errorRegistro || errorIngreso };
 }

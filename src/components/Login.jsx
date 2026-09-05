@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { verificarClave, guardarSesion } from "../utils/auth";
+import { verificarClave, guardarSesion, sincronizarSesionSupabase } from "../utils/auth";
 
 /**
  * Pantalla de login. Bloquea el resto de la interfaz hasta que haya una
@@ -43,6 +43,11 @@ export default function Login({ usuarios, onIngresar }) {
       setError("Usuario o clave incorrectos.");
       return;
     }
+
+    // Abre (o crea, la primera vez) la sesión real de Supabase que exigen
+    // las políticas de seguridad de las tablas — ver la nota en utils/auth.js.
+    // Nunca bloquea el login si falla: la persona entra a la app igual.
+    await sincronizarSesionSupabase(usuarioNormalizado, clave);
 
     const sesion = guardarSesion(encontrado);
     onIngresar(sesion);
